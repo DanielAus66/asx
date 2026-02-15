@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'dart:async';
 import '../providers/app_provider.dart';
+import '../services/api_service.dart';
 import '../services/subscription_service.dart';
 import '../models/stock.dart';
 import '../utils/theme.dart';
@@ -19,6 +21,7 @@ class _SearchScreenState extends State<SearchScreen> {
   List<Stock> _results = [];
   bool _isLoading = false;
   String? _error;
+  Timer? _debounceTimer;
 
   @override
   void initState() {
@@ -30,6 +33,7 @@ class _SearchScreenState extends State<SearchScreen> {
 
   @override
   void dispose() {
+    _debounceTimer?.cancel();
     _controller.dispose();
     _focusNode.dispose();
     super.dispose();
@@ -63,6 +67,391 @@ class _SearchScreenState extends State<SearchScreen> {
     }
   }
 
+  void _showStockActions(BuildContext context, Stock stock, AppProvider provider, SubscriptionService subscription) {
+    final inWatchlist = provider.isInWatchlist(stock.symbol);
+    
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppTheme.cardColor,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Header
+            Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(stock.displaySymbol, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                      Text(stock.name, style: const TextStyle(color: AppTheme.textSecondaryColor, fontSize: 13)),
+                    ],
+                  ),
+                ),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(stock.formattedPrice, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                    Text(
+                      '${stock.changePercent >= 0 ? '+' : ''}${stock.changePercent.toStringAsFixed(2)}%',
+                      style: TextStyle(color: stock.changePercent >= 0 ? AppTheme.successColor : AppTheme.errorColor),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            const Divider(height: 24),
+            
+            // View Details
+            ListTile(
+              leading: const Icon(Icons.show_chart, color: AppTheme.accentColor),
+              title: const Text('View Details & Chart'),
+              subtitle: const Text('Full stock analysis', style: TextStyle(fontSize: 11, color: AppTheme.textSecondaryColor)),
+              onTap: () {
+                Navigator.pop(ctx);
+                provider.stockCache[stock.symbol] = stock;
+                showModalBottomSheet(
+                  context: context,
+                  isScrollControlled: true,
+                  backgroundColor: Colors.transparent,
+                  builder: (_) => StockDetailSheet(symbol: stock.symbol),
+                );
+              },
+            ),
+            
+            // Test Rules on this stock
+            ListTile(
+              leading: const Icon(Icons.science, color: Colors.purple),
+              title: const Text('Test Rules on This Stock'),
+              subtitle: const Text('Run all active rules against this stock', style: TextStyle(fontSize: 11, color: AppTheme.textSecondaryColor)),
+              onTap: () {
+                Navigator.pop(ctx);
+                _testRulesOnStock(context, stock, provider);
+              },
+            ),
+            
+            // Backtest on this stock
+            ListTile(
+              leading: const Icon(Icons.history, color: Colors.orange),
+              title: const Text('Backtest on This Stock'),
+              subtitle: const Text('Test rule performance on this stock\'s history', style: TextStyle(fontSize: 11, color: AppTheme.textSecondaryColor)),
+              onTap: () {
+                Navigator.pop(ctx);
+                _backtestOnStock(context, stock, provider, subscription);
+              },
+            ),
+            
+            const Divider(height: 8),
+            
+            // Add/Remove from Watchlist
+            if (!inWatchlist)
+              ListTile(
+                leading: const Icon(Icons.bookmark_add, color: AppTheme.successColor),
+                title: const Text('Add to Watchlist'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  if (provider.canAddToWatchlist()) {
+                    provider.addToWatchlist(stock.symbol, stock.name, stock.currentPrice);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('${stock.displaySymbol} added to watchlist'), backgroundColor: AppTheme.successColor),
+                    );
+                  } else {
+                    PaywallScreen.show(context, feature: ProFeature.unlimitedWatchlist);
+                  }
+                },
+              )
+            else
+              ListTile(
+                leading: const Icon(Icons.bookmark_remove, color: AppTheme.errorColor),
+                title: const Text('Remove from Watchlist'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  provider.removeFromWatchlist(stock.symbol);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('${stock.displaySymbol} removed from watchlist'), backgroundColor: AppTheme.textSecondaryColor),
+                  );
+                },
+              ),
+            
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+  
+  Future<void> _testRulesOnStock(BuildContext context, Stock stock, AppProvider provider) async {
+    // Show loading dialog
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const AlertDialog(
+        backgroundColor: AppTheme.cardColor,
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircularProgressIndicator(color: AppTheme.accentColor),
+            SizedBox(height: 16),
+            Text('Testing rules...'),
+          ],
+        ),
+      ),
+    );
+    
+    try {
+      // Fetch historical data for the stock
+      final priceData = await ApiService.fetchHistoricalPricesAndVolumes(stock.symbol, days: 300);
+      final prices = (priceData['prices'])?.map((p) => (p as num).toDouble()).toList() ?? [];
+      final volumes = (priceData['volumes'])?.map((v) => (v as num).toInt()).toList() ?? [];
+      
+      if (prices.isEmpty) {
+        Navigator.pop(context); // Close loading
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not fetch price data'), backgroundColor: AppTheme.errorColor),
+        );
+        return;
+      }
+      
+      // Test all active rules
+      final activeRules = provider.activeRules;
+      final matchedRules = <String>[];
+      
+      for (final rule in activeRules) {
+        final passed = provider.testRuleOnStock(stock, rule, prices: prices, volumes: volumes);
+        if (passed) {
+          matchedRules.add(rule.name);
+        }
+      }
+      
+      Navigator.pop(context); // Close loading
+      
+      // Show results
+      showDialog(
+        context: context,
+        builder: (_) => AlertDialog(
+          backgroundColor: AppTheme.cardColor,
+          title: Row(
+            children: [
+              Icon(
+                matchedRules.isNotEmpty ? Icons.check_circle : Icons.cancel,
+                color: matchedRules.isNotEmpty ? AppTheme.successColor : AppTheme.textSecondaryColor,
+              ),
+              const SizedBox(width: 12),
+              Expanded(child: Text('${stock.displaySymbol} Rule Test', style: const TextStyle(fontSize: 18))),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (matchedRules.isEmpty)
+                const Text('No active rules matched this stock today.', style: TextStyle(color: AppTheme.textSecondaryColor))
+              else ...[
+                Text('${matchedRules.length} rule${matchedRules.length > 1 ? 's' : ''} matched:', style: const TextStyle(fontWeight: FontWeight.w600)),
+                const SizedBox(height: 12),
+                ...matchedRules.map((rule) => Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.bolt, size: 16, color: AppTheme.accentColor),
+                      const SizedBox(width: 8),
+                      Expanded(child: Text(rule, style: const TextStyle(color: AppTheme.accentColor))),
+                    ],
+                  ),
+                )),
+              ],
+              const SizedBox(height: 8),
+              Text('Tested ${activeRules.length} active rules', style: const TextStyle(fontSize: 12, color: AppTheme.textTertiaryColor)),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
+            if (matchedRules.isNotEmpty && !provider.isInWatchlist(stock.symbol))
+              ElevatedButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                  provider.addToWatchlist(stock.symbol, stock.name, stock.currentPrice, triggerRules: matchedRules);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('${stock.displaySymbol} added to watchlist'), backgroundColor: AppTheme.successColor),
+                  );
+                },
+                child: const Text('Add to Watchlist'),
+              ),
+          ],
+        ),
+      );
+    } catch (e) {
+      Navigator.pop(context); // Close loading
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error: ${e.toString()}'), backgroundColor: AppTheme.errorColor),
+      );
+    }
+  }
+  
+  Future<void> _backtestOnStock(BuildContext context, Stock stock, AppProvider provider, SubscriptionService subscription) async {
+    if (!provider.canRunBacktest()) {
+      PaywallScreen.show(context, feature: ProFeature.unlimitedBacktests);
+      return;
+    }
+    
+    // Show rule selection dialog
+    final activeRules = provider.availableRules;
+    String? selectedRuleId;
+    int selectedPeriod = 30;
+    
+    final result = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (_) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          backgroundColor: AppTheme.cardColor,
+          title: Text('Backtest on ${stock.displaySymbol}'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Select Rule:', style: TextStyle(fontWeight: FontWeight.w600)),
+                const SizedBox(height: 8),
+                Container(
+                  height: 200,
+                  decoration: BoxDecoration(
+                    color: AppTheme.backgroundColor,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: activeRules.length,
+                    itemBuilder: (_, i) {
+                      final rule = activeRules[i];
+                      final isSelected = selectedRuleId == rule.id;
+                      return ListTile(
+                        dense: true,
+                        selected: isSelected,
+                        selectedTileColor: AppTheme.accentColor.withValues(alpha: 0.15),
+                        title: Text(rule.name, style: TextStyle(fontSize: 13, color: isSelected ? AppTheme.accentColor : null)),
+                        trailing: isSelected ? const Icon(Icons.check, color: AppTheme.accentColor, size: 18) : null,
+                        onTap: () => setDialogState(() => selectedRuleId = rule.id),
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text('Period:', style: TextStyle(fontWeight: FontWeight.w600)),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  children: [7, 14, 30, 90].map((days) {
+                    final isSelected = selectedPeriod == days;
+                    return ChoiceChip(
+                      label: Text(days == 7 ? '1W' : days == 14 ? '2W' : days == 30 ? '1M' : '3M'),
+                      selected: isSelected,
+                      selectedColor: AppTheme.accentColor,
+                      onSelected: (_) => setDialogState(() => selectedPeriod = days),
+                    );
+                  }).toList(),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+            ElevatedButton(
+              onPressed: selectedRuleId == null ? null : () => Navigator.pop(context, {'ruleId': selectedRuleId, 'period': selectedPeriod}),
+              child: const Text('Run Backtest'),
+            ),
+          ],
+        ),
+      ),
+    );
+    
+    if (result == null) return;
+    
+    final selectedRule = activeRules.firstWhere((r) => r.id == result['ruleId']);
+    final period = result['period'] as int;
+    
+    // Show loading
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        backgroundColor: AppTheme.cardColor,
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const CircularProgressIndicator(color: AppTheme.accentColor),
+            const SizedBox(height: 16),
+            Text('Backtesting ${selectedRule.name}...'),
+            Text('on ${stock.displaySymbol} for $period days', style: const TextStyle(fontSize: 12, color: AppTheme.textSecondaryColor)),
+          ],
+        ),
+      ),
+    );
+    
+    try {
+      final backtestResult = await provider.backtestRuleOnStock(stock.symbol, selectedRule, periodDays: period);
+      
+      Navigator.pop(context); // Close loading
+      
+      // Show results
+      final signals = backtestResult['signals'] as List<Map<String, dynamic>>? ?? [];
+      final stats = backtestResult['stats'] as Map<String, dynamic>? ?? {};
+      
+      showDialog(
+        context: context,
+        builder: (_) => AlertDialog(
+          backgroundColor: AppTheme.cardColor,
+          title: Text('${stock.displaySymbol} Backtest Results'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Rule: ${selectedRule.name}', style: const TextStyle(fontWeight: FontWeight.w600)),
+              Text('Period: $period days', style: const TextStyle(color: AppTheme.textSecondaryColor, fontSize: 13)),
+              const Divider(height: 24),
+              if (signals.isEmpty)
+                const Text('No signals found in this period.', style: TextStyle(color: AppTheme.textSecondaryColor))
+              else ...[
+                Text('${signals.length} signal${signals.length > 1 ? 's' : ''} found', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 12),
+                ...signals.take(5).map((s) {
+                  final change = (s['changePercent'] as double?) ?? 0;
+                  final isUp = change >= 0;
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Row(
+                      children: [
+                        Text('${s['daysAgo']}d ago:', style: const TextStyle(fontSize: 12, color: AppTheme.textSecondaryColor)),
+                        const Spacer(),
+                        Text(
+                          '${isUp ? '+' : ''}${change.toStringAsFixed(1)}%',
+                          style: TextStyle(color: isUp ? AppTheme.successColor : AppTheme.errorColor, fontWeight: FontWeight.w600),
+                        ),
+                      ],
+                    ),
+                  );
+                }),
+                if (signals.length > 5)
+                  Text('... and ${signals.length - 5} more', style: const TextStyle(fontSize: 11, color: AppTheme.textTertiaryColor)),
+              ],
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
+          ],
+        ),
+      );
+    } catch (e) {
+      Navigator.pop(context); // Close loading
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error: ${e.toString()}'), backgroundColor: AppTheme.errorColor),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Consumer2<AppProvider, SubscriptionService>(
@@ -86,11 +475,10 @@ class _SearchScreenState extends State<SearchScreen> {
                 border: InputBorder.none,
               ),
               onChanged: (value) {
-                // Debounce search
-                Future.delayed(const Duration(milliseconds: 300), () {
-                  if (_controller.text == value) {
-                    _search(value);
-                  }
+                // Proper debounce: cancel previous timer, start new 300ms delay
+                _debounceTimer?.cancel();
+                _debounceTimer = Timer(const Duration(milliseconds: 300), () {
+                  _search(value);
                 });
               },
               onSubmitted: _search,
@@ -203,16 +591,7 @@ class _SearchScreenState extends State<SearchScreen> {
           ),
           child: ListTile(
             contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            onTap: () {
-              // Add to cache first so detail sheet can find it
-              provider.stockCache[stock.symbol] = stock;
-              showModalBottomSheet(
-                context: context,
-                isScrollControlled: true,
-                backgroundColor: Colors.transparent,
-                builder: (_) => StockDetailSheet(symbol: stock.symbol),
-              );
-            },
+            onTap: () => _showStockActions(context, stock, provider, subscription),
             leading: Container(
               width: 48,
               height: 48,
@@ -227,49 +606,29 @@ class _SearchScreenState extends State<SearchScreen> {
                 ),
               ),
             ),
-            title: Text(stock.displaySymbol, style: const TextStyle(fontWeight: FontWeight.w600)),
+            title: Row(
+              children: [
+                Text(stock.displaySymbol, style: const TextStyle(fontWeight: FontWeight.w600)),
+                if (inWatchlist) ...[
+                  const SizedBox(width: 6),
+                  const Icon(Icons.bookmark, size: 14, color: AppTheme.accentColor),
+                ],
+              ],
+            ),
             subtitle: Text(
               stock.name,
               style: const TextStyle(fontSize: 12, color: AppTheme.textSecondaryColor),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
+            trailing: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Text(stock.formattedPrice, style: const TextStyle(fontWeight: FontWeight.w600)),
-                    Text(
-                      '${isUp ? '+' : ''}${stock.changePercent.toStringAsFixed(2)}%',
-                      style: TextStyle(color: color, fontSize: 12),
-                    ),
-                  ],
-                ),
-                const SizedBox(width: 8),
-                IconButton(
-                  icon: Icon(
-                    inWatchlist ? Icons.bookmark : Icons.bookmark_border,
-                    color: inWatchlist ? AppTheme.accentColor : AppTheme.textTertiaryColor,
-                  ),
-                  onPressed: () {
-                    if (inWatchlist) {
-                      provider.removeFromWatchlist(stock.symbol);
-                    } else if (provider.canAddToWatchlist()) {
-                      provider.addToWatchlist(stock.symbol, stock.name, stock.currentPrice);
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text('${stock.displaySymbol} added to watchlist'),
-                          backgroundColor: AppTheme.successColor,
-                          duration: const Duration(seconds: 1),
-                        ),
-                      );
-                    } else {
-                      PaywallScreen.show(context, feature: ProFeature.unlimitedWatchlist);
-                    }
-                  },
+                Text(stock.formattedPrice, style: const TextStyle(fontWeight: FontWeight.w600)),
+                Text(
+                  '${isUp ? '+' : ''}${stock.changePercent.toStringAsFixed(2)}%',
+                  style: TextStyle(color: color, fontSize: 12),
                 ),
               ],
             ),

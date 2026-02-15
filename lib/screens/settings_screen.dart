@@ -80,6 +80,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               ]),
               const SizedBox(height: 24),
+              _buildSection('Personal', [
+                _UserNameTile(),
+                _PortfolioSourceTile(),
+              ]),
+              const SizedBox(height: 24),
               _buildSection('Statistics', [
                 _buildStatTile('Watchlist', '${provider.watchlist.length}${subscription.isPro ? '' : ' / ${SubscriptionService.freeMaxWatchlist}'}'),
                 _buildStatTile('Rules', '${provider.rules.length} (${provider.activeRules.length} active)'),
@@ -91,6 +96,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 _buildTile(context, icon: Icons.info_outline, title: 'Version', subtitle: '1.0.0', onTap: null),
                 _buildTile(context, icon: Icons.code, title: 'Data Source', subtitle: 'Yahoo Finance', onTap: null),
               ]),
+              
               const SizedBox(height: 32),
             ],
           ),
@@ -248,5 +254,206 @@ class _SettingsScreenState extends State<SettingsScreen> {
       await provider.initialize();
       if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Cache cleared')));
     }
+  }
+}
+
+/// User name tile with edit functionality
+class _UserNameTile extends StatefulWidget {
+  @override
+  State<_UserNameTile> createState() => _UserNameTileState();
+}
+
+class _UserNameTileState extends State<_UserNameTile> {
+  String? _userName;
+  
+  @override
+  void initState() {
+    super.initState();
+    _loadName();
+  }
+  
+  Future<void> _loadName() async {
+    final name = await StorageService.getUserName();
+    setState(() => _userName = name);
+  }
+  
+  void _editName() {
+    final controller = TextEditingController(text: _userName ?? '');
+    
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: AppTheme.cardColor,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Your Name'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          textCapitalization: TextCapitalization.words,
+          decoration: InputDecoration(
+            hintText: 'Enter your name',
+            filled: true,
+            fillColor: AppTheme.backgroundColor,
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: BorderSide.none,
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel', style: TextStyle(color: AppTheme.textSecondaryColor)),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              final name = controller.text.trim();
+              await StorageService.saveUserName(name);
+              setState(() => _userName = name.isEmpty ? null : name);
+              if (mounted) Navigator.pop(context);
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppTheme.accentColor,
+              foregroundColor: Colors.black,
+            ),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+  }
+  
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      leading: Container(
+        width: 40, height: 40,
+        decoration: BoxDecoration(
+          color: AppTheme.accentColor.withValues(alpha: 0.15),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: const Icon(Icons.person_outline, color: AppTheme.accentColor),
+      ),
+      title: const Text('Display Name'),
+      subtitle: Text(
+        _userName ?? 'Not set',
+        style: TextStyle(
+          color: _userName != null ? AppTheme.textSecondaryColor : AppTheme.textTertiaryColor,
+          fontStyle: _userName == null ? FontStyle.italic : FontStyle.normal,
+        ),
+      ),
+      trailing: const Icon(Icons.chevron_right, color: AppTheme.textTertiaryColor),
+      onTap: _editName,
+    );
+  }
+}
+
+/// Portfolio source selector: Holdings Only, Watchlist Only, Both
+class _PortfolioSourceTile extends StatelessWidget {
+  String _label(PortfolioSource source) {
+    switch (source) {
+      case PortfolioSource.holdings: return 'Holdings Only';
+      case PortfolioSource.watchlist: return 'Watchlist Only';
+      case PortfolioSource.both: return 'Holdings + Watchlist';
+    }
+  }
+
+  String _subtitle(PortfolioSource source) {
+    switch (source) {
+      case PortfolioSource.holdings: return 'Portfolio value from your actual shares';
+      case PortfolioSource.watchlist: return 'Simulated returns from tracked stocks';
+      case PortfolioSource.both: return 'Combined real + simulated P&L';
+    }
+  }
+
+  IconData _icon(PortfolioSource source) {
+    switch (source) {
+      case PortfolioSource.holdings: return Icons.account_balance_wallet;
+      case PortfolioSource.watchlist: return Icons.bookmark;
+      case PortfolioSource.both: return Icons.join_full;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Consumer<AppProvider>(
+      builder: (context, provider, child) {
+        return ListTile(
+          leading: Container(
+            width: 40, height: 40,
+            decoration: BoxDecoration(
+              color: AppTheme.accentColor.withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Icon(_icon(provider.portfolioSource), color: AppTheme.accentColor, size: 20),
+          ),
+          title: const Text('Portfolio Source'),
+          subtitle: Text(
+            _label(provider.portfolioSource),
+            style: const TextStyle(fontSize: 12, color: AppTheme.textSecondaryColor),
+          ),
+          trailing: const Icon(Icons.chevron_right, color: AppTheme.textTertiaryColor),
+          onTap: () => _showPicker(context, provider),
+        );
+      },
+    );
+  }
+
+  void _showPicker(BuildContext context, AppProvider provider) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppTheme.surfaceColor,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Portfolio Source', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+              const SizedBox(height: 4),
+              const Text('Choose what the Portfolio card on Home tracks', style: TextStyle(fontSize: 13, color: AppTheme.textSecondaryColor)),
+              const SizedBox(height: 16),
+              ...PortfolioSource.values.map((source) {
+                final isActive = source == provider.portfolioSource;
+                return GestureDetector(
+                  onTap: () {
+                    provider.setPortfolioSource(source);
+                    Navigator.pop(ctx);
+                  },
+                  child: Container(
+                    margin: const EdgeInsets.only(bottom: 8),
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: isActive ? AppTheme.accentColor.withValues(alpha: 0.12) : AppTheme.cardColor,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: isActive ? AppTheme.accentColor.withValues(alpha: 0.4) : Colors.transparent,
+                      ),
+                    ),
+                    child: Row(children: [
+                      Icon(_icon(source), size: 20,
+                          color: isActive ? AppTheme.accentColor : AppTheme.textSecondaryColor),
+                      const SizedBox(width: 12),
+                      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text(_label(source), style: TextStyle(
+                          fontWeight: FontWeight.w600, fontSize: 14,
+                          color: isActive ? AppTheme.accentColor : AppTheme.textPrimaryColor,
+                        )),
+                        Text(_subtitle(source), style: const TextStyle(fontSize: 11, color: AppTheme.textSecondaryColor)),
+                      ])),
+                      if (isActive)
+                        const Icon(Icons.check_circle, color: AppTheme.accentColor, size: 20),
+                    ]),
+                  ),
+                );
+              }),
+              const SizedBox(height: 8),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }

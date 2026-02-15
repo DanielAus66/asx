@@ -1,7 +1,9 @@
 import 'dart:convert';
+import 'dart:math' as math;
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/stock.dart';
+import 'error_reporting_service.dart';
 
 class ApiService {
   static const List<String> _baseUrls = [
@@ -17,6 +19,150 @@ class ApiService {
   static const String _keyAsxSymbols = 'asx_symbols_cache';
   static const String _keyAsxNames = 'asx_names_cache';
   static const String _keyAsxCacheTime = 'asx_symbols_cache_time';
+
+  // --- Rate limiting & circuit breaker state ---
+  static int _requestCount = 0;
+  static DateTime _windowStart = DateTime.now();
+  static const int _maxRequestsPerWindow = 1800; // Conservative: 1800/hour (Yahoo ~2000)
+  static const Duration _windowDuration = Duration(hours: 1);
+  
+  // Circuit breaker
+  static int _consecutiveFailures = 0;
+  static DateTime? _circuitOpenUntil;
+  static const int _circuitBreakerThreshold = 5; // Open after 5 consecutive failures
+  static const Duration _circuitBreakerCooldown = Duration(seconds: 30);
+
+  /// Rate-limited, retrying HTTP GET with exponential backoff
+  static Future<http.Response?> _rateLimitedGet(Uri url, {int maxRetries = 3}) async {
+    // Circuit breaker check
+    if (_circuitOpenUntil != null && DateTime.now().isBefore(_circuitOpenUntil!)) {
+      print('DEBUG API: Circuit breaker open until $_circuitOpenUntil, skipping request');
+      return null;
+    }
+    
+    // Rate limit check
+    final now = DateTime.now();
+    if (now.difference(_windowStart) > _windowDuration) {
+      _requestCount = 0;
+      _windowStart = now;
+    }
+    
+    if (_requestCount >= _maxRequestsPerWindow) {
+      print('DEBUG API: Rate limit reached ($_requestCount/$_maxRequestsPerWindow), waiting...');
+      final waitTime = _windowDuration - now.difference(_windowStart);
+      await Future.delayed(waitTime.isNegative ? const Duration(seconds: 5) : Duration(seconds: 5));
+      _requestCount = 0;
+      _windowStart = DateTime.now();
+    }
+    
+    // Retry with exponential backoff
+    for (int attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        _requestCount++;
+        final response = await http.get(url, headers: _headers)
+            .timeout(const Duration(seconds: 10));
+        
+        if (response.statusCode == 200) {
+          _consecutiveFailures = 0; // Reset circuit breaker
+          return response;
+        }
+        
+        if (response.statusCode == 429) {
+          // Rate limited by Yahoo - back off aggressively
+          _consecutiveFailures++;
+          final backoff = Duration(seconds: math.pow(2, attempt + 2).toInt()); // 4, 8, 16, 32s
+          print('DEBUG API: 429 rate limited, backing off ${backoff.inSeconds}s (attempt $attempt)');
+          await Future.delayed(backoff);
+          continue;
+        }
+        
+        if (response.statusCode >= 500) {
+          // Server error - retry with backoff
+          _consecutiveFailures++;
+          final backoff = Duration(seconds: math.pow(2, attempt).toInt()); // 1, 2, 4s
+          print('DEBUG API: ${response.statusCode} server error, retrying in ${backoff.inSeconds}s');
+          await Future.delayed(backoff);
+          continue;
+        }
+        
+        // 4xx (not 429) - don't retry, it's a client error
+        return response;
+        
+      } catch (e) {
+        _consecutiveFailures++;
+        if (attempt < maxRetries) {
+          final backoff = Duration(seconds: math.pow(2, attempt).toInt());
+          print('DEBUG API: Request failed ($e), retrying in ${backoff.inSeconds}s (attempt $attempt)');
+          await Future.delayed(backoff);
+        } else {
+          print('DEBUG API: Request failed after $maxRetries retries: $e');
+        }
+      }
+    }
+    
+    // Check if circuit breaker should open
+    if (_consecutiveFailures >= _circuitBreakerThreshold) {
+      _circuitOpenUntil = DateTime.now().add(_circuitBreakerCooldown);
+      print('DEBUG API: Circuit breaker OPEN - too many failures. Cooling down for ${_circuitBreakerCooldown.inSeconds}s');
+    }
+    
+    return null;
+  }
+
+  /// Rate-limited POST request
+  static Future<http.Response?> _rateLimitedPost(Uri url, {required Map<String, String> headers, required String body, int maxRetries = 2}) async {
+    if (_circuitOpenUntil != null && DateTime.now().isBefore(_circuitOpenUntil!)) {
+      return null;
+    }
+    
+    final now = DateTime.now();
+    if (now.difference(_windowStart) > _windowDuration) {
+      _requestCount = 0;
+      _windowStart = now;
+    }
+    if (_requestCount >= _maxRequestsPerWindow) {
+      await Future.delayed(const Duration(seconds: 5));
+      _requestCount = 0;
+      _windowStart = DateTime.now();
+    }
+    
+    for (int attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        _requestCount++;
+        final response = await http.post(url, headers: headers, body: body)
+            .timeout(const Duration(seconds: 30));
+        if (response.statusCode == 200) {
+          _consecutiveFailures = 0;
+          return response;
+        }
+        if (response.statusCode == 429 || response.statusCode >= 500) {
+          _consecutiveFailures++;
+          await Future.delayed(Duration(seconds: math.pow(2, attempt + 1).toInt()));
+          continue;
+        }
+        return response;
+      } catch (e) {
+        _consecutiveFailures++;
+        if (attempt < maxRetries) {
+          await Future.delayed(Duration(seconds: math.pow(2, attempt).toInt()));
+        }
+      }
+    }
+    
+    if (_consecutiveFailures >= _circuitBreakerThreshold) {
+      _circuitOpenUntil = DateTime.now().add(_circuitBreakerCooldown);
+    }
+    return null;
+  }
+  
+  /// Get current rate limit status (for UI display)
+  static Map<String, dynamic> get rateLimitStatus => {
+    'requestsThisWindow': _requestCount,
+    'maxRequests': _maxRequestsPerWindow,
+    'windowResetAt': _windowStart.add(_windowDuration).toIso8601String(),
+    'circuitBreakerOpen': _circuitOpenUntil != null && DateTime.now().isBefore(_circuitOpenUntil!),
+    'consecutiveFailures': _consecutiveFailures,
+  };
 
   static Future<void> initializeValidSymbols() async {
     if (_symbolsInitialized) return;
@@ -99,12 +245,12 @@ class ApiService {
   static Future<List<String>> _fetchFromAsxDirectory() async {
     try {
       // ASX provides a CSV of all listed companies
-      final response = await http.get(
+      final response = await _rateLimitedGet(
         Uri.parse('https://asx.api.markitdigital.com/asx-research/1.0/companies/directory/file?access_token=83ff96335c2d45a094df02a206a39ff4'),
-        headers: {'Accept': 'text/csv'},
-      ).timeout(const Duration(seconds: 30));
+        maxRetries: 2,
+      );
       
-      if (response.statusCode == 200) {
+      if (response != null && response.statusCode == 200) {
         final lines = response.body.split('\n');
         final symbols = <String>[];
         
@@ -144,7 +290,7 @@ class ApiService {
       for (int offset = 0; offset < 3000; offset += 250) {
         final url = 'https://query1.finance.yahoo.com/v1/finance/screener?formatted=false&lang=en-AU&region=AU&count=250&offset=$offset';
         
-        final response = await http.post(
+        final response = await _rateLimitedPost(
           Uri.parse(url),
           headers: {
             'Content-Type': 'application/json',
@@ -165,7 +311,7 @@ class ApiService {
           }),
         ).timeout(const Duration(seconds: 30));
         
-        if (response.statusCode == 200) {
+        if (response != null && response.statusCode == 200) {
           final data = jsonDecode(response.body);
           final quotes = data['finance']?['result']?[0]?['quotes'] as List? ?? [];
           
@@ -277,14 +423,39 @@ class ApiService {
     return results;
   }
 
-  /// Fetch a single stock quote
+  /// Fetch a single stock quote with cross-validation for ETFs
   static Future<Stock?> fetchStock(String symbol) async {
     print('DEBUG fetchStock: Trying to fetch $symbol');
+    
+    // Check if this is likely an ETF (common ETF patterns)
+    final isLikelyEtf = _isLikelyEtf(symbol);
+    
     final quoteStock = await _fetchFromQuote(symbol);
+    
     if (quoteStock != null) {
-      print('DEBUG fetchStock: Got $symbol from quote API');
+      print('DEBUG fetchStock: Got $symbol from quote API @ \$${quoteStock.currentPrice}');
+      
+      // For ETFs or if price seems suspiciously low, cross-validate with chart
+      if (isLikelyEtf || quoteStock.currentPrice < 1.0) {
+        final chartStock = await _fetchFromChart(symbol);
+        if (chartStock != null && chartStock.currentPrice > 0) {
+          // Check if prices differ by more than 30%
+          final priceDiff = (quoteStock.currentPrice - chartStock.currentPrice).abs();
+          final percentDiff = (priceDiff / chartStock.currentPrice) * 100;
+          
+          print('DEBUG fetchStock: Cross-validation for $symbol - Quote: \$${quoteStock.currentPrice}, Chart: \$${chartStock.currentPrice}, Diff: ${percentDiff.toStringAsFixed(1)}%');
+          
+          if (percentDiff > 30) {
+            // Quote price is likely wrong, use chart price
+            print('DEBUG fetchStock: WARNING - Quote price differs by ${percentDiff.toStringAsFixed(1)}% from chart. Using chart price for $symbol');
+            return chartStock;
+          }
+        }
+      }
+      
       return quoteStock;
     }
+    
     print('DEBUG fetchStock: Quote API failed, trying chart API for $symbol');
     final chartStock = await _fetchFromChart(symbol);
     if (chartStock != null) {
@@ -294,13 +465,39 @@ class ApiService {
     }
     return chartStock;
   }
+  
+  /// Check if a symbol is likely an ETF based on common patterns
+  static bool _isLikelyEtf(String symbol) {
+    final code = symbol.replaceAll('.AX', '').toUpperCase();
+    
+    // Known ETF providers on ASX
+    final etfPrefixes = ['IOZ', 'IVV', 'VAS', 'VGS', 'VTS', 'VAE', 'VAP', 'VEU', 
+                         'NDQ', 'ETHI', 'HACK', 'QUAL', 'GOLD', 'QAU', 'PMGOLD',
+                         'STW', 'SLF', 'MVW', 'MVE', 'MVS', 'MVB', 'MVR',
+                         'AAA', 'VDHG', 'DHHF', 'BGBL', 'A200', 'VHY', 'FAIR',
+                         'GEAR', 'BBOZ', 'BBUS', 'SNAS', 'LNAS', 'YMAX'];
+    
+    // Check exact matches
+    if (etfPrefixes.contains(code)) return true;
+    
+    // Check patterns that suggest ETFs
+    if (code.startsWith('VAF') || code.startsWith('VGB') || code.startsWith('IAF')) return true;
+    if (code.startsWith('BET') || code.startsWith('ACDC') || code.startsWith('SEMI')) return true;
+    
+    // Perth Mint products
+    if (code.contains('GOLD') || code.contains('PMGOLD')) return true;
+    
+    return false;
+  }
+
 
   static Future<Stock?> _fetchFromQuote(String symbol) async {
     for (final baseUrl in _baseUrls) {
       try {
         final url = Uri.parse('$baseUrl/v7/finance/quote?symbols=$symbol');
         print('DEBUG _fetchFromQuote: Calling $url');
-        final response = await http.get(url, headers: _headers).timeout(const Duration(seconds: 10));
+        final response = await _rateLimitedGet(url);
+        if (response == null) continue;
         print('DEBUG _fetchFromQuote: Response status ${response.statusCode}');
         
         if (response.statusCode == 200) {
@@ -342,7 +539,8 @@ class ApiService {
     for (final baseUrl in _baseUrls) {
       try {
         final url = Uri.parse('$baseUrl/v8/finance/chart/$symbol?interval=1d&range=5d');
-        final response = await http.get(url, headers: _headers).timeout(const Duration(seconds: 10));
+        final response = await _rateLimitedGet(url);
+        if (response == null) continue;
         
         if (response.statusCode == 200) {
           final data = json.decode(response.body);
@@ -350,8 +548,38 @@ class ApiService {
           
           if (result != null) {
             final meta = result['meta'] ?? {};
-            final price = (meta['regularMarketPrice'] as num?)?.toDouble();
-            final prevClose = (meta['chartPreviousClose'] as num?)?.toDouble() ?? (meta['previousClose'] as num?)?.toDouble();
+            
+            // Try to get actual close prices from the data array (more reliable)
+            double? price;
+            double? prevClose;
+            
+            final quotes = result['indicators']?['quote']?[0];
+            if (quotes != null) {
+              final closes = quotes['close'] as List?;
+              if (closes != null && closes.isNotEmpty) {
+                // Get last non-null close price
+                for (int i = closes.length - 1; i >= 0; i--) {
+                  if (closes[i] != null) {
+                    price = (closes[i] as num).toDouble();
+                    break;
+                  }
+                }
+                // Get previous close (second to last non-null)
+                int found = 0;
+                for (int i = closes.length - 1; i >= 0 && found < 2; i--) {
+                  if (closes[i] != null) {
+                    if (found == 1) {
+                      prevClose = (closes[i] as num).toDouble();
+                    }
+                    found++;
+                  }
+                }
+              }
+            }
+            
+            // Fallback to meta if data array didn't work
+            price ??= (meta['regularMarketPrice'] as num?)?.toDouble();
+            prevClose ??= (meta['chartPreviousClose'] as num?)?.toDouble() ?? (meta['previousClose'] as num?)?.toDouble();
             
             if (price != null && price > 0) {
               final change = prevClose != null ? price - prevClose : 0.0;
@@ -373,7 +601,7 @@ class ApiService {
             }
           }
         }
-      } catch (_) { /* Continue on error */ }
+      } catch (e, st) { ErrorReportingService.reportApiError(e, endpoint: 'yahoo_finance', stackTrace: st); }
     }
     return null;
   }
@@ -385,7 +613,8 @@ class ApiService {
     for (final baseUrl in _baseUrls) {
       try {
         final url = Uri.parse('$baseUrl/v7/finance/quote?symbols=${symbols.join(',')}');
-        final response = await http.get(url, headers: _headers).timeout(const Duration(seconds: 15));
+        final response = await _rateLimitedGet(url);
+        if (response == null) continue;
         
         if (response.statusCode == 200) {
           final data = json.decode(response.body);
@@ -413,7 +642,7 @@ class ApiService {
           }
           if (stocks.isNotEmpty) return stocks;
         }
-      } catch (_) { /* Continue on error */ }
+      } catch (e, st) { ErrorReportingService.reportApiError(e, endpoint: 'yahoo_finance', stackTrace: st); }
     }
     
     // Fallback: fetch individually
@@ -432,7 +661,8 @@ class ApiService {
     for (final baseUrl in _baseUrls) {
       try {
         final url = Uri.parse('$baseUrl/v8/finance/chart/$symbol?range=$range&interval=$interval');
-        final response = await http.get(url, headers: _headers).timeout(const Duration(seconds: 10));
+        final response = await _rateLimitedGet(url);
+        if (response == null) continue;
         
         if (response.statusCode == 200) {
           final data = json.decode(response.body);
@@ -456,7 +686,7 @@ class ApiService {
           }
           if (chartData.isNotEmpty) return chartData;
         }
-      } catch (_) { /* Continue on error */ }
+      } catch (e, st) { ErrorReportingService.reportApiError(e, endpoint: 'yahoo_finance', stackTrace: st); }
     }
     return [];
   }
@@ -476,7 +706,8 @@ class ApiService {
         final now = DateTime.now();
         final start = now.subtract(Duration(days: days + 10));
         final url = Uri.parse('$baseUrl/v8/finance/chart/$symbol?period1=${start.millisecondsSinceEpoch ~/ 1000}&period2=${now.millisecondsSinceEpoch ~/ 1000}&interval=1d');
-        final response = await http.get(url, headers: _headers).timeout(const Duration(seconds: 10));
+        final response = await _rateLimitedGet(url);
+        if (response == null) continue;
         
         if (response.statusCode == 200) {
           final data = json.decode(response.body);
@@ -492,15 +723,30 @@ class ApiService {
             .map((v) => (v as num).toInt())
             .toList();
           
+          final highsList = (quote?['high'] as List? ?? [])
+            .where((h) => h != null)
+            .map((h) => (h as num).toDouble())
+            .toList();
+          
+          final lowsList = (quote?['low'] as List? ?? [])
+            .where((l) => l != null)
+            .map((l) => (l as num).toDouble())
+            .toList();
+          
           if (closes.isNotEmpty) {
-            return {'prices': closes, 'volumes': volumes};
+            return {
+              'prices': closes,
+              'volumes': volumes,
+              'highs': highsList,
+              'lows': lowsList,
+            };
           }
         }
-      } catch (_) {
-        // Continue to next base URL on error
+      } catch (e, st) {
+        ErrorReportingService.reportApiError(e, endpoint: 'fetchHistoricalPricesAndVolumes', stackTrace: st);
       }
     }
-    return {'prices': <double>[], 'volumes': <int>[]};
+    return {'prices': <double>[], 'volumes': <int>[], 'highs': <double>[], 'lows': <double>[]};
   }
 
   static Map<String, String> get _headers => {

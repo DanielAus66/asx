@@ -161,6 +161,46 @@ class RuleCondition {
       case RuleConditionType.stateNear52WeekHigh: return '📊 Within ${(100 - value).toInt()}% of 52W high';
     }
   }
+  
+  /// Short description for compact display (chips, tags)
+  String get shortDescription {
+    switch (type) {
+      case RuleConditionType.rsiBelow: return 'RSI<${value.toInt()}';
+      case RuleConditionType.rsiAbove: return 'RSI>${value.toInt()}';
+      case RuleConditionType.priceAboveSma: return '>SMA${value.toInt()}';
+      case RuleConditionType.priceBelowSma: return '<SMA${value.toInt()}';
+      case RuleConditionType.priceAboveEma: return '>EMA${value.toInt()}';
+      case RuleConditionType.priceBelowEma: return '<EMA${value.toInt()}';
+      case RuleConditionType.macdCrossover: return 'MACD↑';
+      case RuleConditionType.macdCrossunder: return 'MACD↓';
+      case RuleConditionType.volumeSpike: return 'Vol${value.toStringAsFixed(1)}x';
+      case RuleConditionType.priceNear52WeekLow: return '52WL${value.toInt()}%';
+      case RuleConditionType.priceNear52WeekHigh: return '52WH${value.toInt()}%';
+      case RuleConditionType.bollingerBreakout: return 'BB break';
+      case RuleConditionType.priceChangeAbove: return 'Δ>${value.toInt()}%';
+      case RuleConditionType.priceChangeBelow: return 'Δ<${value.toInt()}%';
+      case RuleConditionType.momentum6Month: return '6M>${value.toInt()}%';
+      case RuleConditionType.momentum12Month: return '12M>${value.toInt()}%';
+      case RuleConditionType.nearAllTimeHigh: return 'Near ATH';
+      case RuleConditionType.breakoutNDayHigh: return '${value.toInt()}D high';
+      case RuleConditionType.breakoutHeld: return 'Held ${value.toInt()}d';
+      case RuleConditionType.vcpSetup: return 'VCP';
+      case RuleConditionType.bollingerSqueeze: return 'BB squeeze';
+      case RuleConditionType.stealthAccumulation: return 'Stealth';
+      case RuleConditionType.obvDivergence: return 'OBV div';
+      case RuleConditionType.oversoldBounce: return 'Bounce';
+      case RuleConditionType.earningsSurprise: return 'EPS beat';
+      case RuleConditionType.insiderBuying: return 'Insider';
+      case RuleConditionType.event52WeekHighCrossover: return '⚡52WH';
+      case RuleConditionType.eventVolumeBreakout: return '⚡Vol';
+      case RuleConditionType.eventMomentumCrossover: return '⚡Mom';
+      case RuleConditionType.stateMomentumPositive: return 'Mom+';
+      case RuleConditionType.stateVolumeExpanding: return 'Vol↑';
+      case RuleConditionType.stateAboveSma50: return '>SMA50';
+      case RuleConditionType.stateUptrend: return 'Uptrend';
+      case RuleConditionType.stateNear52WeekHigh: return 'Near52H';
+    }
+  }
 }
 
 class ScanRule {

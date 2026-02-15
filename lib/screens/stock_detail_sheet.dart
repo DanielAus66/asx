@@ -9,7 +9,8 @@ import 'paywall_screen.dart';
 
 class StockDetailSheet extends StatefulWidget {
   final String symbol;
-  const StockDetailSheet({super.key, required this.symbol});
+  final List<String>? triggerRules;
+  const StockDetailSheet({super.key, required this.symbol, this.triggerRules});
   @override
   State<StockDetailSheet> createState() => _StockDetailSheetState();
 }
@@ -24,6 +25,14 @@ class _StockDetailSheetState extends State<StockDetailSheet> {
   void initState() {
     super.initState();
     _loadChart();
+    _refreshStockData();
+  }
+
+  Future<void> _refreshStockData() async {
+    // Fetch fresh stock data to ensure price is accurate
+    final provider = Provider.of<AppProvider>(context, listen: false);
+    await provider.getStock(widget.symbol); // This fetches fresh data
+    if (mounted) setState(() {}); // Trigger rebuild with new data
   }
 
   Future<void> _loadChart() async {
@@ -147,6 +156,52 @@ class _StockDetailSheetState extends State<StockDetailSheet> {
                       ],
                     ),
                     const SizedBox(height: 24),
+                    // Signal context - why this stock was surfaced
+                    if (widget.triggerRules != null && widget.triggerRules!.isNotEmpty) ...[
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: AppTheme.accentColor.withValues(alpha: 0.08),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: AppTheme.accentColor.withValues(alpha: 0.2)),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Icon(Icons.bolt, size: 16, color: AppTheme.accentColor),
+                                const SizedBox(width: 6),
+                                const Text('Why this was surfaced', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppTheme.accentColor)),
+                              ],
+                            ),
+                            const SizedBox(height: 10),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 6,
+                              children: widget.triggerRules!.map((rule) => Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                decoration: BoxDecoration(
+                                  color: AppTheme.cardColor,
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(color: AppTheme.accentColor.withValues(alpha: 0.3)),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(_getRuleIcon(rule), size: 14, color: AppTheme.accentColor),
+                                    const SizedBox(width: 6),
+                                    Text(rule, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+                                  ],
+                                ),
+                              )).toList(),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                    ],
                     // Watchlist button
                     SizedBox(
                       width: double.infinity,
@@ -188,6 +243,17 @@ class _StockDetailSheetState extends State<StockDetailSheet> {
         );
       },
     );
+  }
+
+  IconData _getRuleIcon(String ruleName) {
+    final lower = ruleName.toLowerCase();
+    if (lower.contains('momentum') || lower.contains('big mover')) return Icons.trending_up;
+    if (lower.contains('breakout') || lower.contains('52-week') || lower.contains('52w')) return Icons.open_in_new;
+    if (lower.contains('rsi') || lower.contains('oversold') || lower.contains('reversal') || lower.contains('bounce')) return Icons.change_circle_outlined;
+    if (lower.contains('volume') || lower.contains('obv') || lower.contains('accumulation')) return Icons.bar_chart;
+    if (lower.contains('golden') || lower.contains('cross') || lower.contains('trend') || lower.contains('sma')) return Icons.auto_graph;
+    if (lower.contains('vcp') || lower.contains('squeeze')) return Icons.compress;
+    return Icons.bolt;
   }
 
   Widget _buildStat(String label, String value) {

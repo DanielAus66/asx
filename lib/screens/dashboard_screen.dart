@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import '../providers/app_provider.dart';
 import '../services/subscription_service.dart';
 import '../utils/theme.dart';
+import '../widgets/scan_filters_sheet.dart';
 import 'stock_detail_sheet.dart';
 import 'alerts_screen.dart';
 import 'search_screen.dart';
@@ -256,6 +257,60 @@ class DashboardScreen extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        // Filters row
+        Row(
+          children: [
+            GestureDetector(
+              onTap: () async {
+                final newFilters = await ScanFiltersSheet.show(context, provider.scanFilters);
+                if (newFilters != null) {
+                  provider.updateScanFilters(newFilters);
+                }
+              },
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: provider.scanFilters.enabled ? AppTheme.accentColor.withValues(alpha: 0.15) : AppTheme.cardColor,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: provider.scanFilters.enabled ? AppTheme.accentColor : Colors.transparent,
+                    width: 1,
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.filter_list,
+                      size: 16,
+                      color: provider.scanFilters.enabled ? AppTheme.accentColor : AppTheme.textSecondaryColor,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      provider.scanFilters.enabled ? 'Filters: On' : 'Filters: Off',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: provider.scanFilters.enabled ? AppTheme.accentColor : AppTheme.textSecondaryColor,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            if (provider.scanFilters.enabled) ...[
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  provider.scanFilters.toString(),
+                  style: const TextStyle(fontSize: 11, color: AppTheme.textTertiaryColor),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ],
+        ),
+        const SizedBox(height: 12),
+        
         // Scan buttons
         Row(children: [
           Expanded(
@@ -658,11 +713,21 @@ class DashboardScreen extends StatelessWidget {
               subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 Text(stock.name, style: const TextStyle(fontSize: 12, color: AppTheme.textSecondaryColor), overflow: TextOverflow.ellipsis),
                 const SizedBox(height: 4),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(color: AppTheme.accentColor.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(4)),
-                  child: Text(result.ruleName, style: const TextStyle(fontSize: 10, color: AppTheme.accentColor, fontWeight: FontWeight.w600)),
+                // Show all matched rules
+                Wrap(
+                  spacing: 4,
+                  runSpacing: 2,
+                  children: result.matchedRuleNames.take(3).map((ruleName) => Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                    decoration: BoxDecoration(color: AppTheme.accentColor.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(4)),
+                    child: Text(ruleName, style: const TextStyle(fontSize: 9, color: AppTheme.accentColor, fontWeight: FontWeight.w600)),
+                  )).toList(),
                 ),
+                if (result.matchedRuleNames.length > 3)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text('+${result.matchedRuleNames.length - 3} more', style: const TextStyle(fontSize: 9, color: AppTheme.textTertiaryColor)),
+                  ),
               ]),
               trailing: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.end, children: [
                 Text(stock.formattedPrice, style: const TextStyle(fontWeight: FontWeight.w600)),
@@ -699,12 +764,25 @@ class DashboardScreen extends StatelessWidget {
               ),
               Text(stock.name, style: const TextStyle(color: AppTheme.textSecondaryColor)),
               const SizedBox(height: 8),
-              Row(
-                children: [
-                  const Icon(Icons.bolt, size: 14, color: AppTheme.accentColor),
-                  const SizedBox(width: 4),
-                  Text('Triggered by: ${result.ruleName}', style: const TextStyle(fontSize: 12, color: AppTheme.accentColor)),
-                ],
+              // Show all matched rules
+              Wrap(
+                spacing: 6,
+                runSpacing: 4,
+                children: result.matchedRuleNames.map((ruleName) => Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: AppTheme.accentColor.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.bolt, size: 12, color: AppTheme.accentColor),
+                      const SizedBox(width: 4),
+                      Text(ruleName, style: const TextStyle(fontSize: 11, color: AppTheme.accentColor, fontWeight: FontWeight.w500)),
+                    ],
+                  ),
+                )).toList(),
               ),
               const SizedBox(height: 16),
               
@@ -712,10 +790,16 @@ class DashboardScreen extends StatelessWidget {
                 ListTile(
                   leading: const Icon(Icons.add_circle_outline, color: AppTheme.successColor),
                   title: const Text('Add to Watchlist'),
-                  subtitle: Text('Track with "${result.ruleName}" trigger', style: const TextStyle(fontSize: 11, color: AppTheme.textSecondaryColor)),
+                  subtitle: Text('Matched: ${result.matchedRuleNames.join(", ")}', style: const TextStyle(fontSize: 11, color: AppTheme.textSecondaryColor), maxLines: 2, overflow: TextOverflow.ellipsis),
                   onTap: () {
                     Navigator.pop(ctx);
-                    provider.addToWatchlist(stock.symbol, stock.name, stock.currentPrice, triggerRule: result.ruleName);
+                    provider.addToWatchlist(
+                      stock.symbol, 
+                      stock.name, 
+                      stock.currentPrice, 
+                      triggerRule: result.ruleName,
+                      triggerRules: result.matchedRuleNames,
+                    );
                     ScaffoldMessenger.of(context).showSnackBar(
                       SnackBar(content: Text('${stock.displaySymbol} added to watchlist'), backgroundColor: AppTheme.successColor),
                     );

@@ -75,6 +75,25 @@ class BackgroundTaskService {
     );
   }
   
+  /// Show completion notification before stopping
+  static Future<void> completeTask({
+    required String taskName,
+    required int matches,
+    required int uniqueStocks,
+  }) async {
+    // Update notification to show completion
+    await FlutterForegroundTask.updateService(
+      notificationTitle: 'ASX Radar - Complete ✓',
+      notificationText: '$taskName finished: $matches signals from $uniqueStocks stocks',
+    );
+    
+    // Keep notification visible for 3 seconds so user sees it
+    await Future.delayed(const Duration(seconds: 3));
+    
+    // Now stop the service
+    await FlutterForegroundTask.stopService();
+  }
+  
   /// Stop the foreground task
   static Future<bool> stopTask() async {
     return await FlutterForegroundTask.stopService();

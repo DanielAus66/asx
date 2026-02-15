@@ -1,6 +1,8 @@
+import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../models/stock.dart';
 import '../models/watchlist_item.dart';
 import '../models/scan_rule.dart';
@@ -11,20 +13,63 @@ import '../services/technical_indicators_service.dart';
 import '../services/scan_engine_service.dart';
 import '../services/subscription_service.dart';
 import '../services/background_task_service.dart';
+import '../services/error_reporting_service.dart';
+import 'watchlist_provider.dart';
+
+enum ScanSortOption {
+  matchTime,
+  alphabetical,
+  priceHigh,
+  priceLow,
+  changeHigh,
+  changeLow,
+  volumeHigh,
+  rulesMatched,
+}
+
+enum PortfolioSource {
+  holdings,
+  watchlist,
+  both,
+}
 
 /// Scan result with matched rule info
 class ScanResult {
   final Stock stock;
-  final String ruleId;
-  final String ruleName;
+  final String ruleId; // Primary rule ID (first matched)
+  final String ruleName; // Primary rule name
+  final List<String> matchedRuleIds; // All rule IDs that matched
+  final List<String> matchedRuleNames; // All rule names that matched
   final DateTime matchedAt;
 
-  ScanResult({required this.stock, required this.ruleId, required this.ruleName, required this.matchedAt});
+  ScanResult({
+    required this.stock, 
+    required this.ruleId, 
+    required this.ruleName, 
+    required this.matchedAt,
+    List<String>? matchedRuleIds,
+    List<String>? matchedRuleNames,
+  }) : matchedRuleIds = matchedRuleIds ?? [ruleId],
+       matchedRuleNames = matchedRuleNames ?? [ruleName];
+  
+  // Add a rule to the matched list
+  ScanResult withAdditionalRule(String id, String name) {
+    return ScanResult(
+      stock: stock,
+      ruleId: ruleId,
+      ruleName: ruleName,
+      matchedAt: matchedAt,
+      matchedRuleIds: [...matchedRuleIds, if (!matchedRuleIds.contains(id)) id],
+      matchedRuleNames: [...matchedRuleNames, if (!matchedRuleNames.contains(name)) name],
+    );
+  }
 }
 
-class AppProvider with ChangeNotifier {
+class AppProvider with ChangeNotifier, WatchlistProviderMixin {
   Map<String, Stock> _stockCache = {};
-  List<WatchlistItem> _watchlist = [];
+  
+  /// Cached backtest stats per rule ID (populated after backtests)
+  final Map<String, Map<String, dynamic>> _ruleBacktestStats = {};
   List<ScanRule> _rules = [];
   List<Map<String, dynamic>> _alerts = [];
   List<ScanResult> _scanResults = [];
@@ -37,15 +82,23 @@ class AppProvider with ChangeNotifier {
   String? _error;
   DateTime? _lastRefresh;
   SubscriptionService? _subscription;
-  bool _includeDividends = false;
+  PortfolioSource _portfolioSource = PortfolioSource.holdings;
+
+  // Provide stockCache and subscription to WatchlistProviderMixin
+  @override
+  Map<String, Stock> get stockCache => _stockCache;
+  @override
+  SubscriptionService? get subscription => _subscription;
   ScanFilters _scanFilters = ScanFilters.defaultFilters;
 
-  Map<String, Stock> get stockCache => _stockCache;
-  List<WatchlistItem> get watchlist => _watchlist;
+  // Non-watchlist getters (watchlist ones come from WatchlistProviderMixin)
   List<ScanRule> get rules => _rules;
   List<ScanRule> get activeRules => _rules.where((r) => r.isActive).toList();
   List<Map<String, dynamic>> get alerts => _alerts;
   List<ScanResult> get scanResults => _scanResults;
+  
+  /// Get cached backtest stats for a rule, or null if not yet tested
+  Map<String, dynamic>? getRuleBacktestStats(String ruleId) => _ruleBacktestStats[ruleId];
   bool get isLoading => _isLoading;
   bool get isScanning => _isScanning;
   String get scanStatus => _scanStatus;
@@ -55,23 +108,19 @@ class AppProvider with ChangeNotifier {
   String? get error => _error;
   DateTime? get lastRefresh => _lastRefresh;
   int get unreadAlertCount => _alerts.where((a) => a['isRead'] != true).length;
-  SubscriptionService? get subscription => _subscription;
-  bool get includeDividends => _includeDividends;
   ScanFilters get scanFilters => _scanFilters;
+  PortfolioSource get portfolioSource => _portfolioSource;
   
   void updateScanFilters(ScanFilters filters) {
     _scanFilters = filters;
     notifyListeners();
   }
 
-  double get portfolioValue => _watchlist.fold(0, (sum, item) => sum + (item.currentPrice ?? item.addedPrice));
-  double get portfolioGainLoss => _watchlist.fold(0.0, (sum, item) => sum + item.dollarGainLoss);
-  double get portfolioGainLossPercent {
-    double totalCost = _watchlist.fold(0, (sum, item) => sum + item.addedPrice);
-    return totalCost == 0 ? 0 : portfolioGainLoss / totalCost * 100;
+  Future<void> setPortfolioSource(PortfolioSource source) async {
+    _portfolioSource = source;
+    await StorageService.saveSettings({'portfolioSource': source.name});
+    notifyListeners();
   }
-  int get winnersCount => _watchlist.where((w) => w.gainLossPercent > 0).length;
-  int get losersCount => _watchlist.where((w) => w.gainLossPercent < 0).length;
 
   void setSubscription(SubscriptionService subscription) {
     _subscription = subscription;
@@ -93,21 +142,33 @@ class AppProvider with ChangeNotifier {
     _isLoading = true;
     notifyListeners();
     try {
-      _watchlist = await StorageService.loadWatchlist();
+      await initWatchlist();
       _rules = await StorageService.loadRules();
       _alerts = await StorageService.loadAlerts();
       _stockCache = await StorageService.loadStockCache();
       _lastRefresh = await StorageService.getCacheTime();
       
+      // Load persisted scan results from last session
+      await _loadScanResults();
+      
       // Load settings
       final settings = await StorageService.loadSettings();
-      _includeDividends = settings['includeDividends'] ?? false;
+      includeDividendsValue = settings['includeDividends'] ?? false;
+      final srcStr = settings['portfolioSource'] as String?;
+      if (srcStr != null) {
+        _portfolioSource = PortfolioSource.values.firstWhere(
+          (e) => e.name == srcStr, orElse: () => PortfolioSource.holdings,
+        );
+      }
       
       await ApiService.initializeValidSymbols();
+      
+      // ALWAYS refresh watchlist prices on app open
+      await updateWatchlistPrices();
+      
+      // Also refresh major stocks if cache is empty
       if (_stockCache.isEmpty) {
         await refreshData();
-      } else {
-        await _updateWatchlistPrices();
       }
     } catch (e) { _error = e.toString(); }
     _isLoading = false;
@@ -127,109 +188,19 @@ class AppProvider with ChangeNotifier {
       _lastRefresh = DateTime.now();
       
       // Update watchlist with fresh prices
-      await _updateWatchlistPrices();
+      await updateWatchlistPrices();
     } catch (e) { _error = e.toString(); }
     _isLoading = false;
     notifyListeners();
   }
 
-  Future<void> _updateWatchlistPrices() async {
-    if (_watchlist.isEmpty) return;
-    
-    // Always fetch fresh prices for all watchlist items
-    final symbols = _watchlist.map((w) => w.symbol).toList();
-    
-    try {
-      // Fetch all watchlist stocks in one batch call
-      final stocks = await ApiService.fetchStocks(symbols);
-      
-      for (final stock in stocks) {
-        // Update cache with fresh data
-        _stockCache[stock.symbol] = stock;
-        
-        // Update watchlist item
-        final index = _watchlist.indexWhere((w) => w.symbol == stock.symbol);
-        if (index != -1) {
-          _watchlist[index].updatePrice(stock.currentPrice, change: stock.change, changePercent: stock.changePercent);
-        }
-      }
-    } catch (e) {
-      // Fallback: fetch individually if batch fails
-      for (int i = 0; i < _watchlist.length; i++) {
-        try {
-          final stock = await ApiService.fetchStock(_watchlist[i].symbol);
-          if (stock != null) {
-            _watchlist[i].updatePrice(stock.currentPrice, change: stock.change, changePercent: stock.changePercent);
-            _stockCache[stock.symbol] = stock;
-          }
-        } catch (_) {}
-      }
-    }
-    
-    await StorageService.saveWatchlist(_watchlist);
-    await StorageService.saveStockCache(_stockCache);
+  // Watchlist methods are provided by WatchlistProviderMixin
+  // refreshWatchlistPrices delegates to the mixin's updateWatchlistPrices
+  Future<void> refreshWatchlistPrices() async {
+    await updateWatchlistPrices();
+    await StorageService.saveWatchlist(watchlist);
     notifyListeners();
   }
-
-  bool canAddToWatchlist() => _subscription?.canAddToWatchlist(_watchlist.length) ?? true;
-
-  int get remainingWatchlistSlots {
-    if (_subscription?.isPro ?? false) return -1;
-    return SubscriptionService.freeMaxWatchlist - _watchlist.length;
-  }
-
-  /// Add stock to watchlist - simulates purchase at current price
-  /// Pro users can set custom capital, free users get $10,000 default
-  Future<void> addToWatchlist(String symbol, String name, double price, {double? customCapital, String? triggerRule, List<String>? triggerRules}) async {
-    if (_watchlist.any((w) => w.symbol == symbol)) return;
-    
-    // Only Pro users can set custom capital
-    final capital = (_subscription?.isPro ?? false) && customCapital != null 
-      ? customCapital 
-      : 10000.0;
-    
-    _watchlist.add(WatchlistItem(
-      symbol: symbol, 
-      name: name, 
-      addedPrice: price, 
-      addedAt: DateTime.now(), 
-      currentPrice: price,
-      capitalInvested: capital,
-      triggerRule: triggerRule,
-      triggerRules: triggerRules,
-    ));
-    await StorageService.saveWatchlist(_watchlist);
-    notifyListeners();
-  }
-
-  Future<void> removeFromWatchlist(String symbol) async {
-    _watchlist.removeWhere((w) => w.symbol == symbol);
-    await StorageService.saveWatchlist(_watchlist);
-    notifyListeners();
-  }
-
-  /// Update capital invested for a watchlist item (Pro only)
-  Future<void> updateWatchlistCapital(String symbol, double newCapital) async {
-    if (!(_subscription?.isPro ?? false)) return;
-    
-    final index = _watchlist.indexWhere((w) => w.symbol == symbol);
-    if (index != -1) {
-      _watchlist[index] = _watchlist[index].copyWith(capitalInvested: newCapital);
-      await StorageService.saveWatchlist(_watchlist);
-      notifyListeners();
-    }
-  }
-
-  /// Toggle include dividends in returns (Pro only)
-  Future<void> toggleDividends() async {
-    if (!(_subscription?.isPro ?? false)) return;
-    
-    _includeDividends = !_includeDividends;
-    await StorageService.saveSettings({'includeDividends': _includeDividends});
-    notifyListeners();
-  }
-
-  bool isInWatchlist(String symbol) => _watchlist.any((w) => w.symbol == symbol);
 
   Future<void> toggleRule(String id) async {
     if (!canUseRule(id)) {
@@ -337,65 +308,81 @@ class AppProvider with ChangeNotifier {
           _validStocksFound++;
           _stockCache[stock.symbol] = stock;
           
-          // Apply scan filters first (before expensive rule evaluation)
-          List<double>? pricesForFilter;
-          if (_scanFilters.enabled && _scanFilters.maxSingleDayGap != null) {
-            // Need price history for gap check
-            final priceData = await ApiService.fetchHistoricalPricesAndVolumes(stock.symbol, days: 10);
-            pricesForFilter = (priceData['prices'])?.map((p) => (p as num).toDouble()).toList();
-          }
+          // --- Fetch historical data ONCE per stock ---
+          // Determine the maximum data needed across all active rules
+          bool anyNeedsHistorical = false;
+          bool anyNeedsVolume = false;
+          bool anyNeedsLongHistory = false;
           
-          if (!_scanFilters.passesFilters(
-            currentPrice: stock.currentPrice,
-            avgVolume: stock.avgVolume,
-            historicalPrices: pricesForFilter,
-          )) {
-            continue; // Skip this stock - doesn't pass filters
-          }
-
-          // Check each rule
           for (final rule in usableActiveRules) {
-            List<double>? prices = pricesForFilter;
-            List<int>? volumes;
-            
-            // Check if rule needs historical data
-            final needsHistoricalData = !ScanEngineService.canQuickEvaluate(rule);
-            final needsVolumeData = rule.conditions.any((c) => 
+            if (!ScanEngineService.canQuickEvaluate(rule)) anyNeedsHistorical = true;
+            if (rule.conditions.any((c) => 
               c.type == RuleConditionType.stateVolumeExpanding ||
               c.type == RuleConditionType.eventVolumeBreakout ||
               c.type == RuleConditionType.volumeSpike ||
               c.type == RuleConditionType.stealthAccumulation
-            );
-            final needsLongHistory = rule.conditions.any((c) =>
+            )) anyNeedsVolume = true;
+            if (rule.conditions.any((c) =>
               c.type == RuleConditionType.event52WeekHighCrossover ||
               c.type == RuleConditionType.eventMomentumCrossover ||
               c.type == RuleConditionType.stateMomentumPositive ||
               c.type == RuleConditionType.stateNear52WeekHigh ||
               c.type == RuleConditionType.momentum6Month
+            )) anyNeedsLongHistory = true;
+          }
+          
+          // Fetch data once with the maximum required lookback
+          List<double>? prices;
+          List<int>? volumes;
+          List<double>? highs;
+          List<double>? lows;
+          
+          // Always fetch at least short history for filter gap check
+          if (_scanFilters.enabled && _scanFilters.maxSingleDayGap != null) {
+            anyNeedsHistorical = true;
+          }
+          
+          if (anyNeedsHistorical || anyNeedsVolume || anyNeedsLongHistory) {
+            final days = anyNeedsLongHistory ? 280 : 100;
+            final priceData = await ApiService.fetchHistoricalPricesAndVolumes(stock.symbol, days: days);
+            prices = (priceData['prices'])?.map((p) => (p as num).toDouble()).toList();
+            volumes = (priceData['volumes'])?.map((v) => (v as num).toInt()).toList();
+            highs = (priceData['highs'])?.map((h) => (h as num).toDouble()).toList();
+            lows = (priceData['lows'])?.map((l) => (l as num).toDouble()).toList();
+          }
+          
+          // Apply scan filters (using already-fetched prices)
+          if (!_scanFilters.passesFilters(
+            currentPrice: stock.currentPrice,
+            avgVolume: stock.avgVolume,
+            historicalPrices: prices,
+          )) {
+            continue; // Skip this stock - doesn't pass filters
+          }
+
+          // Enrich stock with indicators ONCE
+          Stock enrichedStock = stock;
+          if (prices != null && prices.isNotEmpty) {
+            enrichedStock = await TechnicalIndicatorsService.addIndicators(
+              stock, prices, highs: highs, lows: lows,
             );
-            
-            if (needsHistoricalData || needsVolumeData || needsLongHistory) {
-              // Fetch historical prices and volumes
-              final days = needsLongHistory ? 280 : 100;
-              final priceData = await ApiService.fetchHistoricalPricesAndVolumes(stock.symbol, days: days);
-              prices = (priceData['prices'])?.map((p) => (p as num).toDouble()).toList();
-              volumes = (priceData['volumes'])?.map((v) => (v as num).toInt()).toList();
-            }
+            _stockCache[stock.symbol] = enrichedStock;
+          }
 
-            Stock enrichedStock = stock;
-            if (prices != null && prices.isNotEmpty) {
-              enrichedStock = await TechnicalIndicatorsService.addIndicators(stock, prices);
-              _stockCache[stock.symbol] = enrichedStock;
-            }
-
-            // Use hybrid evaluation for rules with events + state filters
+          // Check each rule against the same enriched stock
+          for (final rule in usableActiveRules) {
             final passed = ScanEngineService.isHybridRule(rule)
               ? ScanEngineService.evaluateHybridRule(enrichedStock, rule, prices: prices, volumes: volumes)
               : ScanEngineService.evaluateRule(enrichedStock, rule, prices: prices, volumes: volumes);
             
             if (passed) {
-              // Check if already matched (by different rule)
-              if (!_scanResults.any((r) => r.stock.symbol == stock.symbol)) {
+              // Check if already matched by a different rule
+              final existingIndex = _scanResults.indexWhere((r) => r.stock.symbol == stock.symbol);
+              if (existingIndex >= 0) {
+                // Add this rule to the existing result
+                _scanResults[existingIndex] = _scanResults[existingIndex].withAdditionalRule(rule.id, rule.name);
+              } else {
+                // First rule match for this stock
                 _scanResults.add(ScanResult(
                   stock: enrichedStock,
                   ruleId: rule.id,
@@ -403,8 +390,9 @@ class AppProvider with ChangeNotifier {
                   matchedAt: DateTime.now(),
                 ));
                 await _createAlert(enrichedStock, rule);
+                // Live-load: notify UI immediately so cards appear as found
+                notifyListeners();
               }
-              break; // Only count first matching rule
             }
           }
         }
@@ -425,8 +413,15 @@ class AppProvider with ChangeNotifier {
 
     _isScanning = false;
     
-    // Stop background task
-    await BackgroundTaskService.stopTask();
+    // Persist scan results for Home screen on next launch
+    await _saveScanResults();
+    
+    // Show completion notification
+    await BackgroundTaskService.completeTask(
+      taskName: 'Scan',
+      matches: _scanResults.length,
+      uniqueStocks: _validStocksFound,
+    );
     
     notifyListeners();
     
@@ -453,6 +448,94 @@ class AppProvider with ChangeNotifier {
     await StorageService.saveAlerts(_alerts);
   }
 
+  // ─── Scan result persistence ───────────────────────────────
+  
+  DateTime? _scanResultsTimestamp;
+  DateTime? get scanResultsTimestamp => _scanResultsTimestamp;
+
+  Future<void> _saveScanResults() async {
+    if (_scanResults.isEmpty) return;
+    try {
+      final data = _scanResults.map((r) => {
+        'stock': r.stock.toJson(),
+        'ruleId': r.ruleId,
+        'ruleName': r.ruleName,
+        'matchedRuleIds': r.matchedRuleIds,
+        'matchedRuleNames': r.matchedRuleNames,
+        'matchedAt': r.matchedAt.toIso8601String(),
+      }).toList();
+      final payload = {
+        'results': data,
+        'timestamp': DateTime.now().toIso8601String(),
+      };
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('last_scan_results', jsonEncode(payload));
+    } catch (_) {}
+  }
+
+  Future<void> _loadScanResults() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('last_scan_results');
+      if (raw == null) return;
+      final payload = jsonDecode(raw) as Map<String, dynamic>;
+      final timestamp = DateTime.tryParse(payload['timestamp'] ?? '');
+      _scanResultsTimestamp = timestamp;
+      
+      // Only load if less than 24 hours old
+      if (timestamp != null && DateTime.now().difference(timestamp).inHours > 24) return;
+      
+      final results = (payload['results'] as List).map((r) {
+        final map = r as Map<String, dynamic>;
+        return ScanResult(
+          stock: Stock.fromJson(map['stock'] as Map<String, dynamic>),
+          ruleId: map['ruleId'] as String,
+          ruleName: map['ruleName'] as String,
+          matchedAt: DateTime.tryParse(map['matchedAt'] ?? '') ?? DateTime.now(),
+          matchedRuleIds: (map['matchedRuleIds'] as List?)?.cast<String>(),
+          matchedRuleNames: (map['matchedRuleNames'] as List?)?.cast<String>(),
+        );
+      }).toList();
+      
+      // Only load persisted results if we don't already have fresh scan results
+      if (_scanResults.isEmpty) {
+        _scanResults = results;
+      }
+    } catch (_) {}
+  }
+
+  // ─── Sort scan results ─────────────────────────────────────
+
+  ScanSortOption _scanSortOption = ScanSortOption.matchTime;
+  ScanSortOption get scanSortOption => _scanSortOption;
+
+  void setScanSort(ScanSortOption option) {
+    _scanSortOption = option;
+    _applyScanSort();
+    notifyListeners();
+  }
+
+  void _applyScanSort() {
+    switch (_scanSortOption) {
+      case ScanSortOption.matchTime:
+        _scanResults.sort((a, b) => b.matchedAt.compareTo(a.matchedAt));
+      case ScanSortOption.alphabetical:
+        _scanResults.sort((a, b) => a.stock.symbol.compareTo(b.stock.symbol));
+      case ScanSortOption.priceHigh:
+        _scanResults.sort((a, b) => b.stock.currentPrice.compareTo(a.stock.currentPrice));
+      case ScanSortOption.priceLow:
+        _scanResults.sort((a, b) => a.stock.currentPrice.compareTo(b.stock.currentPrice));
+      case ScanSortOption.changeHigh:
+        _scanResults.sort((a, b) => b.stock.changePercent.compareTo(a.stock.changePercent));
+      case ScanSortOption.changeLow:
+        _scanResults.sort((a, b) => a.stock.changePercent.compareTo(b.stock.changePercent));
+      case ScanSortOption.volumeHigh:
+        _scanResults.sort((a, b) => b.stock.volume.compareTo(a.stock.volume));
+      case ScanSortOption.rulesMatched:
+        _scanResults.sort((a, b) => b.matchedRuleNames.length.compareTo(a.matchedRuleNames.length));
+    }
+  }
+
   Future<void> markAlertRead(String id) async {
     final index = _alerts.indexWhere((a) => a['id'] == id);
     if (index != -1) {
@@ -470,6 +553,146 @@ class AppProvider with ChangeNotifier {
 
   Future<List<Stock>> searchStocks(String query) async => ApiService.searchAsxStocks(query);
 
+  /// Test a single rule on a stock with the given price/volume data
+  bool testRuleOnStock(Stock stock, ScanRule rule, {List<double>? prices, List<int>? volumes}) {
+    return ScanEngineService.isHybridRule(rule)
+      ? ScanEngineService.evaluateHybridRule(stock, rule, prices: prices, volumes: volumes)
+      : ScanEngineService.evaluateRule(stock, rule, prices: prices, volumes: volumes);
+  }
+  
+  /// Backtest a rule on a single stock's historical data
+  Future<Map<String, dynamic>> backtestRuleOnStock(String symbol, ScanRule rule, {int periodDays = 30}) async {
+    final signals = <Map<String, dynamic>>[];
+    
+    try {
+      // Calculate minimum data needed
+      int minDataDays = periodDays + 100;
+      for (final condition in rule.conditions) {
+        if (condition.type == RuleConditionType.event52WeekHighCrossover) {
+          minDataDays = periodDays + 280;
+        } else if (condition.type == RuleConditionType.momentum6Month || 
+                   condition.type == RuleConditionType.stateMomentumPositive ||
+                   condition.type == RuleConditionType.eventMomentumCrossover) {
+          if (minDataDays < periodDays + 150) minDataDays = periodDays + 150;
+        }
+      }
+      
+      // Fetch historical data
+      final priceData = await ApiService.fetchHistoricalPricesAndVolumes(symbol, days: minDataDays);
+      final prices = (priceData['prices'])?.map((p) => (p as num).toDouble()).toList() ?? [];
+      final volumes = (priceData['volumes'])?.map((v) => (v as num).toInt()).toList() ?? [];
+      
+      if (prices.isEmpty || prices.length < 30) {
+        return {'signals': [], 'stats': {}, 'error': 'Insufficient price data'};
+      }
+      
+      final currentPrice = prices.last;
+      final effectivePeriod = periodDays > (prices.length - 30) ? (prices.length - 30) : periodDays;
+      
+      // Track oldest signal only
+      Map<String, dynamic>? oldestSignal;
+      int oldestDayOffset = 0;
+      
+      // Test each day in the period
+      for (int dayOffset = 1; dayOffset <= effectivePeriod; dayOffset++) {
+        final dataEndIndex = prices.length - dayOffset;
+        if (dataEndIndex < 30) continue;
+        
+        final historicalPrices = prices.sublist(0, dataEndIndex);
+        final historicalVolumes = volumes.length >= prices.length 
+          ? volumes.sublist(0, dataEndIndex) 
+          : <int>[];
+        
+        final priceAtSignal = historicalPrices.last;
+        final prevClose = historicalPrices.length > 1 ? historicalPrices[historicalPrices.length - 2] : priceAtSignal;
+        
+        final lookbackFor52Week = historicalPrices.length > 252 
+          ? historicalPrices.sublist(historicalPrices.length - 252) 
+          : historicalPrices;
+        final weekHigh52 = lookbackFor52Week.reduce((a, b) => a > b ? a : b);
+        final weekLow52 = lookbackFor52Week.reduce((a, b) => a < b ? a : b);
+        
+        double avgVolume = 0;
+        int volumeAtSignal = 0;
+        if (historicalVolumes.length >= 20) {
+          final recentVolumes = historicalVolumes.sublist(historicalVolumes.length - 20);
+          avgVolume = recentVolumes.reduce((a, b) => a + b) / recentVolumes.length;
+          volumeAtSignal = historicalVolumes.last;
+        }
+        
+        final changeAtSignal = priceAtSignal - prevClose;
+        final changePercentAtSignal = prevClose > 0 ? (changeAtSignal / prevClose) * 100 : 0.0;
+        
+        final enrichedMock = await TechnicalIndicatorsService.addIndicators(
+          Stock(
+            symbol: symbol,
+            name: _stockCache[symbol]?.name ?? symbol.replaceAll('.AX', ''),
+            currentPrice: priceAtSignal,
+            previousClose: prevClose,
+            change: changeAtSignal,
+            changePercent: changePercentAtSignal,
+            volume: volumeAtSignal,
+            marketCap: 0,
+            lastUpdate: DateTime.now().subtract(Duration(days: dayOffset)),
+            weekHigh52: weekHigh52,
+            weekLow52: weekLow52,
+            avgVolume: avgVolume,
+          ),
+          historicalPrices,
+        );
+        
+        final passed = ScanEngineService.isHybridRule(rule)
+          ? ScanEngineService.evaluateHybridRule(enrichedMock, rule, prices: historicalPrices, volumes: historicalVolumes)
+          : ScanEngineService.evaluateRule(enrichedMock, rule, prices: historicalPrices, volumes: historicalVolumes);
+        
+        if (passed) {
+          // Calculate returns
+          final returns = <String, double>{};
+          for (final holdDays in [1, 3, 7]) {
+            if (dayOffset >= holdDays) {
+              final exitIndex = dataEndIndex + holdDays - 1;
+              if (exitIndex < prices.length) {
+                final exitPrice = prices[exitIndex];
+                returns['${holdDays}d'] = ((exitPrice - priceAtSignal) / priceAtSignal) * 100;
+              }
+            }
+          }
+          returns['toToday'] = ((currentPrice - priceAtSignal) / priceAtSignal) * 100;
+          
+          final signal = {
+            'symbol': symbol,
+            'signalDate': DateTime.now().subtract(Duration(days: dayOffset)).toIso8601String(),
+            'daysAgo': dayOffset,
+            'priceAtSignal': priceAtSignal,
+            'currentPrice': currentPrice,
+            'returns': returns,
+            'changePercent': returns['toToday'],
+          };
+          
+          // Keep oldest signal
+          if (oldestSignal == null || dayOffset > oldestDayOffset) {
+            oldestSignal = signal;
+            oldestDayOffset = dayOffset;
+          }
+          
+          // Also add to list for display
+          signals.add(signal);
+        }
+      }
+      
+      // Calculate stats if we have signals
+      final stats = signals.isNotEmpty ? _calculateBacktestStats(signals) : {};
+      
+      return {
+        'signals': signals,
+        'stats': stats,
+        'oldestSignal': oldestSignal,
+      };
+    } catch (e) {
+      return {'signals': [], 'stats': {}, 'error': e.toString()};
+    }
+  }
+
   /// Get stock data - always fetches fresh data unless useCached is true
   Future<Stock?> getStock(String symbol, {bool useCached = false}) async {
     // Only use cache if explicitly requested AND cache exists AND is recent (< 1 min)
@@ -482,8 +705,11 @@ class AppProvider with ChangeNotifier {
     // Always fetch fresh data
     final stock = await ApiService.fetchStock(symbol);
     if (stock != null) {
-      final prices = await ApiService.fetchHistoricalPrices(symbol);
-      final enriched = await TechnicalIndicatorsService.addIndicators(stock, prices);
+      final priceData = await ApiService.fetchHistoricalPricesAndVolumes(symbol);
+      final prices = (priceData['prices'])?.map((p) => (p as num).toDouble()).toList() ?? [];
+      final highs = (priceData['highs'])?.map((h) => (h as num).toDouble()).toList();
+      final lows = (priceData['lows'])?.map((l) => (l as num).toDouble()).toList();
+      final enriched = await TechnicalIndicatorsService.addIndicators(stock, prices, highs: highs, lows: lows);
       _stockCache[symbol] = enriched;
       await StorageService.saveStockCache(_stockCache);
       return enriched;
@@ -610,22 +836,29 @@ class AppProvider with ChangeNotifier {
         
         final currentPrice = prices.last;
         
-        // Calculate avg volume for filter
+        // Calculate avg volume for filter (use current as initial check, 
+        // but re-check with historical data per signal date below)
         double avgVolumeForFilter = 0;
         if (volumes.length >= 20) {
           avgVolumeForFilter = volumes.sublist(volumes.length - 20).reduce((a, b) => a + b) / 20;
         }
         
-        // Apply scan filters
-        if (!_scanFilters.passesFilters(
-          currentPrice: currentPrice,
-          avgVolume: avgVolumeForFilter,
-          historicalPrices: prices,
-        )) {
-          continue; // Skip this stock - doesn't pass filters
+        // Quick pre-filter: skip stocks that have NEVER been in the price range
+        // (uses current data for speed, individual signal dates re-checked below)
+        final minHistPrice = prices.reduce((a, b) => a < b ? a : b);
+        final maxHistPrice = prices.reduce((a, b) => a > b ? a : b);
+        if (_scanFilters.enabled) {
+          if (_scanFilters.minPrice != null && maxHistPrice < _scanFilters.minPrice!) continue;
+          if (_scanFilters.maxPrice != null && minHistPrice > _scanFilters.maxPrice!) continue;
         }
         
+        // Track if this stock already has a signal (we want OLDEST only)
+        bool stockAlreadySignaled = false;
+        Map<String, dynamic>? oldestSignal;
+        int oldestDayOffset = 0;
+        
         // Test EVERY day in the effective period (rolling window)
+        // We iterate through all days to find the OLDEST signal
         for (int dayOffset = 1; dayOffset <= effectivePeriod; dayOffset++) {
           if (!_isScanning) break;
           
@@ -652,6 +885,15 @@ class AppProvider with ChangeNotifier {
             final recentVolumes = historicalVolumes.sublist(historicalVolumes.length - 20);
             avgVolume = recentVolumes.reduce((a, b) => a + b) / recentVolumes.length;
             volumeAtSignal = historicalVolumes.last;
+          }
+          
+          // Fix look-ahead bias: apply filters at the signal date, not current date
+          if (!_scanFilters.passesFilters(
+            currentPrice: priceAtSignal,
+            avgVolume: avgVolume,
+            historicalPrices: historicalPrices,
+          )) {
+            continue; // Would not have passed filters at this date
           }
           
           final changeAtSignal = priceAtSignal - prevClose;
@@ -682,8 +924,6 @@ class AppProvider with ChangeNotifier {
             : ScanEngineService.evaluateRule(enrichedMock, rule, prices: historicalPrices, volumes: historicalVolumes);
           
           if (passed) {
-            totalSignalCount++;
-            
             // Calculate returns at different holding periods
             final returns = <String, double>{};
             for (final holdDays in [1, 3, 7]) {
@@ -698,8 +938,8 @@ class AppProvider with ChangeNotifier {
             returns['toToday'] = ((currentPrice - priceAtSignal) / priceAtSignal) * 100;
             
             // Check if in watchlist
-            final inWatchlist = _watchlist.any((w) => w.symbol == symbol);
-            final watchlistItem = inWatchlist ? _watchlist.firstWhere((w) => w.symbol == symbol) : null;
+            final inWatchlist = watchlist.any((w) => w.symbol == symbol);
+            final watchlistItem = inWatchlist ? watchlist.firstWhere((w) => w.symbol == symbol) : null;
             
             final signal = {
               'symbol': symbol,
@@ -716,12 +956,23 @@ class AppProvider with ChangeNotifier {
               'watchlistTriggerRule': watchlistItem?.triggerRule,
             };
             
-            signals.add(signal);
-            stockSignals.putIfAbsent(symbol, () => []);
-            stockSignals[symbol]!.add(signal);
-            
-            onResultFound?.call(signal);
+            // Keep only the OLDEST signal (highest dayOffset) for this stock
+            // This prevents the same stock from skewing stats with multiple hits
+            if (!stockAlreadySignaled || dayOffset > oldestDayOffset) {
+              oldestSignal = signal;
+              oldestDayOffset = dayOffset;
+              stockAlreadySignaled = true;
+            }
           }
+        }
+        
+        // After checking all days, add only the oldest signal for this stock
+        if (oldestSignal != null) {
+          totalSignalCount++;
+          signals.add(oldestSignal);
+          stockSignals.putIfAbsent(symbol, () => []);
+          stockSignals[symbol]!.add(oldestSignal);
+          onResultFound?.call(oldestSignal);
         }
       } catch (e) {
         // Skip errors
@@ -739,7 +990,24 @@ class AppProvider with ChangeNotifier {
     _scanStatus = 'Complete: $totalSignalCount signals from ${stockSignals.length} stocks';
     _isScanning = false;
     
-    await BackgroundTaskService.stopTask();
+    // Show completion notification
+    await BackgroundTaskService.completeTask(
+      taskName: 'Backtest: ${rule.name}',
+      matches: totalSignalCount,
+      uniqueStocks: stockSignals.length,
+    );
+    
+    // Cache the toToday stats for inline win-rate badges on rules screen
+    if (stats.containsKey('holdingPeriods')) {
+      final hp = stats['holdingPeriods'];
+      if (hp is Map && hp.containsKey('toToday')) {
+        final todayStats = hp['toToday'];
+        if (todayStats is Map) {
+          _ruleBacktestStats[rule.id] = Map<String, dynamic>.from(todayStats);
+        }
+      }
+    }
+    
     notifyListeners();
     HapticFeedback.mediumImpact();
     
@@ -754,6 +1022,11 @@ class AppProvider with ChangeNotifier {
   }
   
   /// Calculate aggregate statistics for backtest results  
+  /// Calculate aggregate statistics for backtest results
+  /// Uses proper Sharpe ratio: (annualized return - risk free rate) / annualized stddev
+  /// Australian risk-free rate approximation (RBA cash rate ~4.35% as of 2024)
+  static const double _riskFreeRateAnnual = 0.0435; // 4.35% annual
+  
   Map<String, dynamic> _calculateBacktestStats(List<Map<String, dynamic>> signals) {
     if (signals.isEmpty) {
       return {'holdingPeriods': {}, 'totalSignals': 0};
@@ -769,6 +1042,17 @@ class AppProvider with ChangeNotifier {
       }
     }
     
+    // Trading days per year for annualization
+    const tradingDaysPerYear = 252.0;
+    
+    // Map holding period keys to approximate trading days
+    const periodToDays = <String, double>{
+      '1d': 1,
+      '3d': 3,
+      '7d': 5, // 7 calendar days ≈ 5 trading days
+      'toToday': 0, // Variable - computed per signal below
+    };
+    
     final periodStats = <String, Map<String, dynamic>>{};
     
     for (final period in ['1d', '3d', '7d', 'toToday']) {
@@ -778,18 +1062,72 @@ class AppProvider with ChangeNotifier {
       final avgReturn = returns.reduce((a, b) => a + b) / returns.length;
       final winners = returns.where((r) => r > 0).length;
       final winRate = winners / returns.length * 100;
+      final losers = returns.where((r) => r < 0).length;
       
+      // Median return
+      final sortedReturns = List<double>.from(returns)..sort();
+      final median = sortedReturns.length.isOdd
+          ? sortedReturns[sortedReturns.length ~/ 2]
+          : (sortedReturns[sortedReturns.length ~/ 2 - 1] + sortedReturns[sortedReturns.length ~/ 2]) / 2;
+      
+      // Max drawdown (worst single-trade loss)
+      final maxLoss = sortedReturns.first;
+      final maxGain = sortedReturns.last;
+      
+      // Sample standard deviation (N-1)
       final mean = avgReturn;
       final squaredDiffs = returns.map((r) => (r - mean) * (r - mean));
-      final variance = squaredDiffs.reduce((a, b) => a + b) / returns.length;
-      final stdDev = variance > 0 ? sqrt(variance) : 1;
-      final sharpe = stdDev > 0 ? avgReturn / stdDev : 0;
+      final variance = returns.length > 1 
+          ? squaredDiffs.reduce((a, b) => a + b) / (returns.length - 1)
+          : 0.0;
+      final stdDev = variance > 0 ? sqrt(variance) : 0.0;
+      
+      // Annualized Sharpe ratio per holding period
+      double sharpe = 0;
+      if (stdDev > 0) {
+        double holdingDays;
+        if (period == 'toToday') {
+          // Average holding days from signals
+          double totalDays = 0;
+          int count = 0;
+          for (final signal in signals) {
+            final daysAgo = signal['daysAgo'] as int? ?? signal['holdingDays'] as int? ?? 14;
+            totalDays += daysAgo;
+            count++;
+          }
+          holdingDays = count > 0 ? totalDays / count : 14;
+        } else {
+          holdingDays = periodToDays[period] ?? 1;
+        }
+        
+        // Annualize: scale factor = sqrt(tradingDaysPerYear / holdingDays)
+        final annualizationFactor = holdingDays > 0 ? tradingDaysPerYear / holdingDays : tradingDaysPerYear;
+        final annualizedReturn = avgReturn / 100 * annualizationFactor; // Convert % to decimal, annualize
+        final annualizedStdDev = (stdDev / 100) * sqrt(annualizationFactor);
+        
+        // Sharpe = (annualized return - risk free rate) / annualized stddev
+        sharpe = annualizedStdDev > 0 
+            ? (annualizedReturn - _riskFreeRateAnnual) / annualizedStdDev 
+            : 0;
+      }
+      
+      // Profit factor = sum of gains / sum of losses
+      final totalGains = returns.where((r) => r > 0).fold(0.0, (sum, r) => sum + r);
+      final totalLosses = returns.where((r) => r < 0).fold(0.0, (sum, r) => sum + r.abs());
+      final profitFactor = totalLosses > 0 ? totalGains / totalLosses : totalGains > 0 ? double.infinity : 0.0;
       
       periodStats[period] = {
         'avgReturn': avgReturn,
+        'medianReturn': median,
         'winRate': winRate,
         'sharpe': sharpe,
+        'stdDev': stdDev,
+        'maxLoss': maxLoss,
+        'maxGain': maxGain,
+        'profitFactor': profitFactor,
         'count': returns.length,
+        'winners': winners,
+        'losers': losers,
       };
     }
     
@@ -906,20 +1244,24 @@ class AppProvider with ChangeNotifier {
         
         final currentPrice = prices.last;
         
-        // Calculate avg volume for filter
+        // Calculate avg volume for filter (quick pre-check only)
         double avgVolumeForFilterMulti = 0;
         if (volumes.length >= 20) {
           avgVolumeForFilterMulti = volumes.sublist(volumes.length - 20).reduce((a, b) => a + b) / 20;
         }
         
-        // Apply scan filters
-        if (!_scanFilters.passesFilters(
-          currentPrice: currentPrice,
-          avgVolume: avgVolumeForFilterMulti,
-          historicalPrices: prices,
-        )) {
-          continue; // Skip this stock - doesn't pass filters
+        // Quick pre-filter: skip stocks that have NEVER been in the price range
+        final minHistPriceMulti = prices.reduce((a, b) => a < b ? a : b);
+        final maxHistPriceMulti = prices.reduce((a, b) => a > b ? a : b);
+        if (_scanFilters.enabled) {
+          if (_scanFilters.minPrice != null && maxHistPriceMulti < _scanFilters.minPrice!) continue;
+          if (_scanFilters.maxPrice != null && minHistPriceMulti > _scanFilters.maxPrice!) continue;
         }
+        
+        // Track oldest signal and all rules matched across all days
+        Map<String, dynamic>? oldestSignalMulti;
+        int oldestDayOffsetMulti = 0;
+        final allMatchedRulesForStock = <String>{};
         
         // Test EVERY day in the effective period (rolling window)
         for (int dayOffset = 1; dayOffset <= effectivePeriodMulti; dayOffset++) {
@@ -950,6 +1292,15 @@ class AppProvider with ChangeNotifier {
             volumeAtSignal = historicalVolumes.last;
           }
           
+          // Fix look-ahead bias: apply filters at the signal date, not current date
+          if (!_scanFilters.passesFilters(
+            currentPrice: priceAtSignal,
+            avgVolume: avgVolume,
+            historicalPrices: historicalPrices,
+          )) {
+            continue; // Would not have passed filters at this date
+          }
+          
           final changeAtSignal = priceAtSignal - prevClose;
           final changePercentAtSignal = prevClose > 0 ? (changeAtSignal / prevClose) * 100 : 0.0;
           
@@ -972,25 +1323,24 @@ class AppProvider with ChangeNotifier {
           );
           
           // Test each rule (use hybrid evaluation for rules with events + state filters)
-          final matchedRules = <String>[];
+          final matchedRulesThisDay = <String>[];
           for (final rule in rules) {
             final passed = ScanEngineService.isHybridRule(rule)
               ? ScanEngineService.evaluateHybridRule(enrichedMock, rule, prices: historicalPrices, volumes: historicalVolumes)
               : ScanEngineService.evaluateRule(enrichedMock, rule, prices: historicalPrices, volumes: historicalVolumes);
             
             if (passed) {
-              matchedRules.add(rule.name);
+              matchedRulesThisDay.add(rule.name);
+              allMatchedRulesForStock.add(rule.name); // Track all rules ever matched
             }
           }
           
           // Apply AND/OR logic
           final passes = useAndLogic 
-            ? matchedRules.length == rules.length  // AND: must match ALL
-            : matchedRules.isNotEmpty;              // OR: must match at least ONE
+            ? matchedRulesThisDay.length == rules.length  // AND: must match ALL
+            : matchedRulesThisDay.isNotEmpty;              // OR: must match at least ONE
           
           if (passes) {
-            totalSignalCount++;
-            
             // Calculate returns at different holding periods
             final returns = <String, double>{};
             for (final holdDays in [1, 3, 7]) {
@@ -1005,8 +1355,8 @@ class AppProvider with ChangeNotifier {
             returns['toToday'] = ((currentPrice - priceAtSignal) / priceAtSignal) * 100;
             
             // Check if in watchlist
-            final inWatchlist = _watchlist.any((w) => w.symbol == symbol);
-            final watchlistItem = inWatchlist ? _watchlist.firstWhere((w) => w.symbol == symbol) : null;
+            final inWatchlist = watchlist.any((w) => w.symbol == symbol);
+            final watchlistItem = inWatchlist ? watchlist.firstWhere((w) => w.symbol == symbol) : null;
             
             final signal = {
               'symbol': symbol,
@@ -1018,17 +1368,29 @@ class AppProvider with ChangeNotifier {
               'returns': returns,
               'changePercent': returns['toToday'],
               'holdingDays': dayOffset,
-              'matchedRules': matchedRules,
+              'matchedRules': matchedRulesThisDay,
               'inWatchlist': inWatchlist,
               'watchlistTriggerRule': watchlistItem?.triggerRule,
             };
             
-            signals.add(signal);
-            stockSignals.putIfAbsent(symbol, () => []);
-            stockSignals[symbol]!.add(signal);
-            
-            onResultFound?.call(signal);
+            // Keep only the OLDEST signal (highest dayOffset) for this stock
+            if (oldestSignalMulti == null || dayOffset > oldestDayOffsetMulti) {
+              oldestSignalMulti = signal;
+              oldestDayOffsetMulti = dayOffset;
+            }
           }
+        }
+        
+        // After checking all days, add only the oldest signal with ALL matched rules
+        if (oldestSignalMulti != null) {
+          // Update matchedRules to include ALL rules that ever matched for this stock
+          oldestSignalMulti['matchedRules'] = allMatchedRulesForStock.toList();
+          
+          totalSignalCount++;
+          signals.add(oldestSignalMulti);
+          stockSignals.putIfAbsent(symbol, () => []);
+          stockSignals[symbol]!.add(oldestSignalMulti);
+          onResultFound?.call(oldestSignalMulti);
         }
       } catch (e) {
         // Skip errors
@@ -1048,7 +1410,13 @@ class AppProvider with ChangeNotifier {
     _scanStatus = 'Complete: $totalSignalCount signals from ${stockSignals.length} stocks';
     _isScanning = false;
     
-    await BackgroundTaskService.stopTask();
+    // Show completion notification
+    await BackgroundTaskService.completeTask(
+      taskName: 'Multi-Rule Backtest',
+      matches: totalSignalCount,
+      uniqueStocks: stockSignals.length,
+    );
+    
     notifyListeners();
     HapticFeedback.mediumImpact();
     

@@ -91,7 +91,8 @@ class ScanFilters {
     if (maxSingleDayGap != null && historicalPrices != null && historicalPrices.length >= 2) {
       // Check last 5 days for large gaps
       final checkDays = historicalPrices.length > 5 ? 5 : historicalPrices.length - 1;
-      for (int i = historicalPrices.length - checkDays; i < historicalPrices.length; i++) {
+      final startIdx = historicalPrices.length - checkDays;
+      for (int i = startIdx < 1 ? 1 : startIdx; i < historicalPrices.length; i++) {
         final today = historicalPrices[i];
         final yesterday = historicalPrices[i - 1];
         if (yesterday > 0) {
