@@ -60,6 +60,26 @@ enum RuleConditionType {
   
   // State: Near 52-week high (within X% of high)
   stateNear52WeekHigh,
+
+  // === FUNDAMENTAL DATA CONDITIONS (Phase 2) ===
+  // These require async evaluation via FundamentalEvaluator
+  
+  // Announcements (via MarkitDigital API)
+  announcementWithinDays,      // Has any announcement within N days
+  earningsWithinDays,          // Has earnings announcement within N days
+  directorTradeWithinDays,     // Has Appendix 3Y filing within N days
+  capitalRaiseWithinDays,      // Has capital raise announcement within N days
+  marketSensitiveWithinDays,   // Has market-sensitive ann within N days
+
+  // Short Interest (via ASIC daily CSV)
+  shortInterestAbove,          // Short % of float > threshold
+  shortInterestBelow,          // Short % of float < threshold
+  shortInterestRising,         // Short % increased vs prior report
+  daysToCoverAbove,            // Days to cover > N
+
+  // Trading Status (derived from announcements)
+  isNotHalted,                 // Stock is not in trading halt
+  resumedFromHalt,             // Resumed from halt within N days
 }
 
 /// Helper to check if a condition type is an EVENT (triggers once on crossover)
@@ -76,6 +96,27 @@ bool isStateFilterCondition(RuleConditionType type) {
          type == RuleConditionType.stateAboveSma50 ||
          type == RuleConditionType.stateUptrend ||
          type == RuleConditionType.stateNear52WeekHigh;
+}
+
+/// Helper to check if a condition requires async fundamental data
+/// These conditions are evaluated separately via FundamentalEvaluator
+bool isFundamentalCondition(RuleConditionType type) {
+  return type == RuleConditionType.announcementWithinDays ||
+         type == RuleConditionType.earningsWithinDays ||
+         type == RuleConditionType.directorTradeWithinDays ||
+         type == RuleConditionType.capitalRaiseWithinDays ||
+         type == RuleConditionType.marketSensitiveWithinDays ||
+         type == RuleConditionType.shortInterestAbove ||
+         type == RuleConditionType.shortInterestBelow ||
+         type == RuleConditionType.shortInterestRising ||
+         type == RuleConditionType.daysToCoverAbove ||
+         type == RuleConditionType.isNotHalted ||
+         type == RuleConditionType.resumedFromHalt;
+}
+
+/// Check if a rule contains any fundamental conditions
+bool hasFundamentalConditions(ScanRule rule) {
+  return rule.conditions.any((c) => isFundamentalCondition(c.type));
 }
 
 class RuleCondition {
@@ -159,6 +200,18 @@ class RuleCondition {
       case RuleConditionType.stateAboveSma50: return '📊 Price > SMA50';
       case RuleConditionType.stateUptrend: return '📊 In uptrend (20d)';
       case RuleConditionType.stateNear52WeekHigh: return '📊 Within ${(100 - value).toInt()}% of 52W high';
+      // Fundamental conditions (Phase 2)
+      case RuleConditionType.announcementWithinDays: return '📄 Announcement within ${value.toInt()}d';
+      case RuleConditionType.earningsWithinDays: return '📊 Earnings within ${value.toInt()}d';
+      case RuleConditionType.directorTradeWithinDays: return '👤 Director trade within ${value.toInt()}d';
+      case RuleConditionType.capitalRaiseWithinDays: return '💰 Capital raise within ${value.toInt()}d';
+      case RuleConditionType.marketSensitiveWithinDays: return '⚡ Price sensitive within ${value.toInt()}d';
+      case RuleConditionType.shortInterestAbove: return '🩳 Short > ${value.toStringAsFixed(1)}%';
+      case RuleConditionType.shortInterestBelow: return '🩳 Short < ${value.toStringAsFixed(1)}%';
+      case RuleConditionType.shortInterestRising: return '🩳 Short interest rising';
+      case RuleConditionType.daysToCoverAbove: return '🩳 DTC > ${value.toInt()} days';
+      case RuleConditionType.isNotHalted: return '▶️ Not halted';
+      case RuleConditionType.resumedFromHalt: return '⏯️ Resumed within ${value.toInt()}d';
     }
   }
   
@@ -199,6 +252,18 @@ class RuleCondition {
       case RuleConditionType.stateAboveSma50: return '>SMA50';
       case RuleConditionType.stateUptrend: return 'Uptrend';
       case RuleConditionType.stateNear52WeekHigh: return 'Near52H';
+      // Fundamental conditions (Phase 2)
+      case RuleConditionType.announcementWithinDays: return 'Ann';
+      case RuleConditionType.earningsWithinDays: return 'Earn';
+      case RuleConditionType.directorTradeWithinDays: return 'Dir';
+      case RuleConditionType.capitalRaiseWithinDays: return 'Cap';
+      case RuleConditionType.marketSensitiveWithinDays: return '⚡PS';
+      case RuleConditionType.shortInterestAbove: return 'Short↑';
+      case RuleConditionType.shortInterestBelow: return 'Short↓';
+      case RuleConditionType.shortInterestRising: return 'SI↗';
+      case RuleConditionType.daysToCoverAbove: return 'DTC';
+      case RuleConditionType.isNotHalted: return '▶️';
+      case RuleConditionType.resumedFromHalt: return '⏯️';
     }
   }
 }
@@ -445,6 +510,68 @@ final List<ScanRule> defaultRules = [
     name: 'Big Movers', 
     description: 'Stocks up more than 5% today',
     conditions: [RuleCondition(type: RuleConditionType.priceChangeAbove, value: 5)], 
+    createdAt: DateTime.now(),
+  ),
+
+  // === FUNDAMENTAL + TECHNICAL COMBO RULES (Phase 2) ===
+
+  ScanRule(
+    id: 'short_squeeze_setup',
+    name: '🩳 Short Squeeze Setup',
+    description: 'Heavily shorted (>8%) + oversold RSI + volume spike — potential squeeze',
+    conditions: [
+      RuleCondition(type: RuleConditionType.shortInterestAbove, value: 8),
+      RuleCondition(type: RuleConditionType.rsiBelow, value: 30),
+      RuleCondition(type: RuleConditionType.volumeSpike, value: 2.0),
+    ],
+    createdAt: DateTime.now(),
+  ),
+
+  ScanRule(
+    id: 'earnings_bounce',
+    name: '📊 Earnings Bounce',
+    description: 'Oversold stock with earnings released in last 7 days — catalyst play',
+    conditions: [
+      RuleCondition(type: RuleConditionType.earningsWithinDays, value: 7),
+      RuleCondition(type: RuleConditionType.rsiBelow, value: 35),
+      RuleCondition(type: RuleConditionType.volumeSpike, value: 1.5),
+    ],
+    createdAt: DateTime.now(),
+  ),
+
+  ScanRule(
+    id: 'insider_accumulation',
+    name: '👤 Insider Accumulation',
+    description: 'Director trade filing + stealth volume accumulation — smart money signal',
+    conditions: [
+      RuleCondition(type: RuleConditionType.directorTradeWithinDays, value: 14),
+      RuleCondition(type: RuleConditionType.stealthAccumulation, value: 0),
+      RuleCondition(type: RuleConditionType.stateAboveSma50, value: 0),
+    ],
+    createdAt: DateTime.now(),
+  ),
+
+  ScanRule(
+    id: 'post_halt_momentum',
+    name: '⏯️ Post-Halt Momentum',
+    description: 'Stock resumed from halt + price-sensitive news + price surge',
+    conditions: [
+      RuleCondition(type: RuleConditionType.resumedFromHalt, value: 3),
+      RuleCondition(type: RuleConditionType.marketSensitiveWithinDays, value: 3),
+      RuleCondition(type: RuleConditionType.priceChangeAbove, value: 5),
+    ],
+    createdAt: DateTime.now(),
+  ),
+
+  ScanRule(
+    id: 'heavily_shorted_recovery',
+    name: '🩳 Shorted Recovery',
+    description: 'High short interest + MACD bullish cross + 20-day breakout',
+    conditions: [
+      RuleCondition(type: RuleConditionType.shortInterestAbove, value: 8),
+      RuleCondition(type: RuleConditionType.macdCrossover, value: 0),
+      RuleCondition(type: RuleConditionType.breakoutNDayHigh, value: 20),
+    ],
     createdAt: DateTime.now(),
   ),
 ];

@@ -123,9 +123,9 @@ class StrategiesScreenState extends State<StrategiesScreen> with SingleTickerPro
             Expanded(
               child: TabBarView(
                 controller: _tabController,
-                children: [
-                  const RulesScreen(),
-                  const BacktestScreen(),
+                children: const [
+                  RulesScreen(),
+                  BacktestScreen(),
                 ],
               ),
             ),

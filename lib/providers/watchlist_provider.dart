@@ -31,7 +31,7 @@ mixin WatchlistProviderMixin on ChangeNotifier {
 
   bool canAddToWatchlist() => subscription?.canAddToWatchlist(_watchlistItems.length) ?? true;
   int get remainingWatchlistSlots {
-    final max = SubscriptionService.freeMaxWatchlist;
+    const max = SubscriptionService.freeMaxWatchlist;
     return max - _watchlistItems.length;
   }
   bool isInWatchlist(String symbol) => _watchlistItems.any((w) => w.symbol == symbol);

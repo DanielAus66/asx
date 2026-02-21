@@ -257,6 +257,18 @@ class _CreateRuleScreenState extends State<CreateRuleScreen> {
       case RuleConditionType.stateAboveSma50: return '📊 Above SMA50';
       case RuleConditionType.stateUptrend: return '📊 In Uptrend';
       case RuleConditionType.stateNear52WeekHigh: return '📊 Near 52W High';
+      // Fundamental conditions (Phase 2)
+      case RuleConditionType.announcementWithinDays: return '📄 Announcement Within Days';
+      case RuleConditionType.earningsWithinDays: return '📊 Earnings Within Days';
+      case RuleConditionType.directorTradeWithinDays: return '👤 Director Trade Within Days';
+      case RuleConditionType.capitalRaiseWithinDays: return '💰 Capital Raise Within Days';
+      case RuleConditionType.marketSensitiveWithinDays: return '⚡ Price Sensitive Within Days';
+      case RuleConditionType.shortInterestAbove: return '🩳 Short Interest Above';
+      case RuleConditionType.shortInterestBelow: return '🩳 Short Interest Below';
+      case RuleConditionType.shortInterestRising: return '🩳 Short Interest Rising';
+      case RuleConditionType.daysToCoverAbove: return '🩳 Days to Cover Above';
+      case RuleConditionType.isNotHalted: return '▶️ Not Halted';
+      case RuleConditionType.resumedFromHalt: return '⏯️ Resumed From Halt';
     }
   }
 
@@ -328,7 +340,10 @@ class _CreateRuleScreenState extends State<CreateRuleScreen> {
   }
 }
 
-/// Bottom sheet for building a single condition
+// ─────────────────────────────────────────────────────────────────────────────
+// CONDITION BUILDER SHEET
+// ─────────────────────────────────────────────────────────────────────────────
+
 class _ConditionBuilderSheet extends StatefulWidget {
   final RuleCondition? initialCondition;
   final Function(RuleCondition) onSave;
@@ -341,37 +356,128 @@ class _ConditionBuilderSheet extends StatefulWidget {
 
 class _ConditionBuilderSheetState extends State<_ConditionBuilderSheet> {
   RuleConditionType? _selectedType;
-  double _value = 30;
+  double _value = 0;
+  late TextEditingController _valueController;
 
-  final Map<String, List<RuleConditionType>> _categories = {
-    '⚡ Events (Backtest Only)': [RuleConditionType.event52WeekHighCrossover, RuleConditionType.eventVolumeBreakout, RuleConditionType.eventMomentumCrossover],
-    '📊 States (Live + Backtest)': [RuleConditionType.stateNear52WeekHigh, RuleConditionType.stateMomentumPositive, RuleConditionType.stateVolumeExpanding, RuleConditionType.stateAboveSma50, RuleConditionType.stateUptrend],
-    'RSI': [RuleConditionType.rsiBelow, RuleConditionType.rsiAbove],
-    'Moving Averages': [RuleConditionType.priceAboveSma, RuleConditionType.priceBelowSma, RuleConditionType.priceAboveEma, RuleConditionType.priceBelowEma],
-    'MACD': [RuleConditionType.macdCrossover, RuleConditionType.macdCrossunder],
-    'Volume': [RuleConditionType.volumeSpike, RuleConditionType.stealthAccumulation, RuleConditionType.obvDivergence],
-    '52-Week Range': [RuleConditionType.priceNear52WeekLow, RuleConditionType.priceNear52WeekHigh, RuleConditionType.nearAllTimeHigh],
-    'Price Change': [RuleConditionType.priceChangeAbove, RuleConditionType.priceChangeBelow, RuleConditionType.oversoldBounce],
-    'Momentum': [RuleConditionType.momentum6Month, RuleConditionType.momentum12Month],
-    'Breakout': [RuleConditionType.breakoutNDayHigh, RuleConditionType.breakoutHeld],
-    'Volatility': [RuleConditionType.vcpSetup, RuleConditionType.bollingerSqueeze, RuleConditionType.bollingerBreakout],
+  // ── All available conditions grouped by category ──────────────────────────
+  static const Map<String, List<RuleConditionType>> _categories = {
+    '⚡ Events (Backtest Only)': [
+      RuleConditionType.event52WeekHighCrossover,
+      RuleConditionType.eventVolumeBreakout,
+      RuleConditionType.eventMomentumCrossover,
+    ],
+    '📊 State Filters': [
+      RuleConditionType.stateNear52WeekHigh,
+      RuleConditionType.stateMomentumPositive,
+      RuleConditionType.stateVolumeExpanding,
+      RuleConditionType.stateAboveSma50,
+      RuleConditionType.stateUptrend,
+    ],
+    'RSI': [
+      RuleConditionType.rsiBelow,
+      RuleConditionType.rsiAbove,
+    ],
+    'Moving Averages': [
+      RuleConditionType.priceAboveSma,
+      RuleConditionType.priceBelowSma,
+      RuleConditionType.priceAboveEma,
+      RuleConditionType.priceBelowEma,
+    ],
+    'MACD': [
+      RuleConditionType.macdCrossover,
+      RuleConditionType.macdCrossunder,
+    ],
+    'Volume': [
+      RuleConditionType.volumeSpike,
+      RuleConditionType.stealthAccumulation,
+      RuleConditionType.obvDivergence,
+    ],
+    '52-Week Range': [
+      RuleConditionType.priceNear52WeekLow,
+      RuleConditionType.priceNear52WeekHigh,
+      RuleConditionType.nearAllTimeHigh,
+    ],
+    'Price Change': [
+      RuleConditionType.priceChangeAbove,
+      RuleConditionType.priceChangeBelow,
+      RuleConditionType.oversoldBounce,
+    ],
+    'Momentum': [
+      RuleConditionType.momentum6Month,
+      RuleConditionType.momentum12Month,
+    ],
+    'Breakout': [
+      RuleConditionType.breakoutNDayHigh,
+      RuleConditionType.breakoutHeld,
+    ],
+    'Volatility': [
+      RuleConditionType.vcpSetup,
+      RuleConditionType.bollingerSqueeze,
+      RuleConditionType.bollingerBreakout,
+    ],
+    'Earnings & Insiders': [
+      RuleConditionType.earningsSurprise,
+      RuleConditionType.insiderBuying,
+    ],
+    '📄 ASX Announcements': [
+      RuleConditionType.announcementWithinDays,
+      RuleConditionType.earningsWithinDays,
+      RuleConditionType.capitalRaiseWithinDays,
+      RuleConditionType.marketSensitiveWithinDays,
+    ],
+    '👤 Director Activity': [
+      RuleConditionType.directorTradeWithinDays,
+    ],
+    '🩳 Short Interest': [
+      RuleConditionType.shortInterestAbove,
+      RuleConditionType.shortInterestBelow,
+      RuleConditionType.shortInterestRising,
+      RuleConditionType.daysToCoverAbove,
+    ],
+    '▶️ Trading Status': [
+      RuleConditionType.isNotHalted,
+      RuleConditionType.resumedFromHalt,
+    ],
   };
 
   @override
   void initState() {
     super.initState();
-    if (widget.initialCondition != null) {
-      _selectedType = widget.initialCondition!.type;
-      _value = widget.initialCondition!.value;
-    }
+    _selectedType = widget.initialCondition?.type;
+    _value = widget.initialCondition?.value ?? 0;
+    _valueController = TextEditingController(text: _value == 0 ? '' : _formatRaw(_value));
   }
+
+  @override
+  void dispose() {
+    _valueController.dispose();
+    super.dispose();
+  }
+
+  void _selectType(RuleConditionType type) {
+    final defaultVal = _getDefaultValue(type);
+    setState(() {
+      _selectedType = type;
+      _value = defaultVal;
+      _valueController.text = _needsValue(type) ? _formatRaw(defaultVal) : '';
+    });
+  }
+
+  void _applyPreset(double v) {
+    setState(() {
+      _value = v;
+      _valueController.text = _formatRaw(v);
+    });
+  }
+
+  // ── BUILD ─────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
     return DraggableScrollableSheet(
-      initialChildSize: 0.75,
+      initialChildSize: 0.80,
       minChildSize: 0.5,
-      maxChildSize: 0.9,
+      maxChildSize: 0.95,
       builder: (context, scrollController) {
         return Container(
           decoration: const BoxDecoration(
@@ -380,67 +486,66 @@ class _ConditionBuilderSheetState extends State<_ConditionBuilderSheet> {
           ),
           child: Column(
             children: [
-              // Handle
               Container(
                 margin: const EdgeInsets.only(top: 12),
-                width: 40,
-                height: 4,
+                width: 40, height: 4,
                 decoration: BoxDecoration(color: AppTheme.textTertiaryColor, borderRadius: BorderRadius.circular(2)),
               ),
-              
-              // Header
               Padding(
-                padding: const EdgeInsets.all(16),
+                padding: const EdgeInsets.fromLTRB(16, 12, 8, 4),
                 child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text(widget.initialCondition != null ? 'Edit Condition' : 'Add Condition', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                    Text(
+                      widget.initialCondition != null ? 'Edit Condition' : 'Add Condition',
+                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                    ),
+                    const Spacer(),
                     TextButton(
-                      onPressed: _selectedType != null ? _save : null,
-                      child: Text('DONE', style: TextStyle(color: _selectedType != null ? AppTheme.accentColor : AppTheme.textTertiaryColor, fontWeight: FontWeight.w600)),
+                      onPressed: _canSave() ? _save : null,
+                      child: Text('DONE',
+                        style: TextStyle(
+                          color: _canSave() ? AppTheme.accentColor : AppTheme.textTertiaryColor,
+                          fontWeight: FontWeight.w600,
+                        )),
                     ),
                   ],
                 ),
               ),
-
               Expanded(
                 child: ListView(
                   controller: scrollController,
                   padding: const EdgeInsets.symmetric(horizontal: 16),
                   children: [
-                    // Condition Type Selector
-                    const Text('Condition Type', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppTheme.textSecondaryColor)),
-                    const SizedBox(height: 12),
-                    
-                    ..._categories.entries.map((category) => Column(
+                    // Category + type chips
+                    const Text('Condition Type',
+                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppTheme.textSecondaryColor)),
+                    const SizedBox(height: 10),
+                    ..._categories.entries.map((cat) => Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Padding(
-                          padding: const EdgeInsets.only(top: 8, bottom: 8),
-                          child: Text(category.key, style: const TextStyle(fontSize: 12, color: AppTheme.textTertiaryColor)),
+                          padding: const EdgeInsets.only(top: 12, bottom: 6),
+                          child: Text(cat.key,
+                            style: const TextStyle(fontSize: 11, color: AppTheme.textTertiaryColor, letterSpacing: 0.3)),
                         ),
                         Wrap(
                           spacing: 8,
                           runSpacing: 8,
-                          children: category.value.map((type) {
-                            final isSelected = _selectedType == type;
+                          children: cat.value.map((type) {
+                            final selected = _selectedType == type;
                             return GestureDetector(
-                              onTap: () => setState(() {
-                                _selectedType = type;
-                                _value = _getDefaultValue(type);
-                              }),
+                              onTap: () => _selectType(type),
                               child: Container(
                                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                                 decoration: BoxDecoration(
-                                  color: isSelected ? AppTheme.accentColor : AppTheme.cardColor,
+                                  color: selected ? AppTheme.accentColor : AppTheme.cardColor,
                                   borderRadius: BorderRadius.circular(8),
-                                  border: Border.all(color: isSelected ? AppTheme.accentColor : Colors.transparent),
                                 ),
                                 child: Text(
                                   _getTypeName(type),
                                   style: TextStyle(
-                                    color: isSelected ? Colors.black : AppTheme.textPrimaryColor,
-                                    fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
+                                    color: selected ? Colors.black : AppTheme.textPrimaryColor,
+                                    fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
                                     fontSize: 13,
                                   ),
                                 ),
@@ -451,59 +556,70 @@ class _ConditionBuilderSheetState extends State<_ConditionBuilderSheet> {
                       ],
                     )),
 
-                    // Value Slider
+                    // ── Value input ────────────────────────────────────────
                     if (_selectedType != null && _needsValue(_selectedType!)) ...[
                       const SizedBox(height: 24),
                       const Divider(color: AppTheme.dividerColor),
                       const SizedBox(height: 16),
-                      
-                      Text(_getValueLabel(_selectedType!), style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppTheme.textSecondaryColor)),
-                      const SizedBox(height: 8),
-                      
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Slider(
-                              value: _value,
-                              min: _getMinValue(_selectedType!),
-                              max: _getMaxValue(_selectedType!),
-                              divisions: _getDivisions(_selectedType!),
-                              activeColor: AppTheme.accentColor,
-                              inactiveColor: AppTheme.cardColor,
-                              onChanged: (v) => setState(() => _value = v),
+                      Text(_getValueLabel(_selectedType!),
+                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppTheme.textSecondaryColor)),
+                      const SizedBox(height: 10),
+
+                      // Text field for direct entry
+                      Row(children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _valueController,
+                            keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+                            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                            textAlign: TextAlign.center,
+                            decoration: InputDecoration(
+                              filled: true,
+                              fillColor: AppTheme.cardColor,
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(10),
+                                borderSide: BorderSide.none,
+                              ),
+                              suffixText: _getValueSuffix(_selectedType!),
+                              suffixStyle: const TextStyle(color: AppTheme.textSecondaryColor),
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
                             ),
+                            onChanged: (v) {
+                              final parsed = double.tryParse(v);
+                              if (parsed != null) setState(() => _value = parsed);
+                            },
                           ),
-                          Container(
-                            width: 60,
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                            decoration: BoxDecoration(color: AppTheme.cardColor, borderRadius: BorderRadius.circular(8)),
-                            child: Text(
-                              _formatValue(_selectedType!, _value),
-                              style: const TextStyle(fontWeight: FontWeight.w600),
-                              textAlign: TextAlign.center,
-                            ),
-                          ),
-                        ],
-                      ),
+                        ),
+                      ]),
 
                       // Quick presets
                       if (_getPresets(_selectedType!).isNotEmpty) ...[
-                        const SizedBox(height: 12),
+                        const SizedBox(height: 10),
                         Wrap(
                           spacing: 8,
+                          runSpacing: 6,
                           children: _getPresets(_selectedType!).map((preset) {
                             final isSelected = _value == preset;
                             return GestureDetector(
-                              onTap: () => setState(() => _value = preset),
+                              onTap: () => _applyPreset(preset),
                               child: Container(
                                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                                 decoration: BoxDecoration(
-                                  color: isSelected ? AppTheme.accentColor.withValues(alpha: 0.2) : AppTheme.cardColor,
+                                  color: isSelected
+                                      ? AppTheme.accentColor.withValues(alpha: 0.2)
+                                      : AppTheme.cardColor,
                                   borderRadius: BorderRadius.circular(6),
+                                  border: isSelected
+                                      ? Border.all(color: AppTheme.accentColor.withValues(alpha: 0.5))
+                                      : null,
                                 ),
                                 child: Text(
                                   _formatValue(_selectedType!, preset),
-                                  style: TextStyle(fontSize: 12, color: isSelected ? AppTheme.accentColor : AppTheme.textSecondaryColor),
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
+                                    color: isSelected ? AppTheme.accentColor : AppTheme.textSecondaryColor,
+                                  ),
                                 ),
                               ),
                             );
@@ -512,27 +628,26 @@ class _ConditionBuilderSheetState extends State<_ConditionBuilderSheet> {
                       ],
                     ],
 
-                    // Preview
+                    // ── Preview ────────────────────────────────────────────
                     if (_selectedType != null) ...[
                       const SizedBox(height: 24),
                       Container(
-                        padding: const EdgeInsets.all(16),
+                        padding: const EdgeInsets.all(14),
                         decoration: BoxDecoration(
-                          color: AppTheme.accentColor.withValues(alpha: 0.1),
+                          color: AppTheme.accentColor.withValues(alpha: 0.10),
                           borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: AppTheme.accentColor.withValues(alpha: 0.3)),
                         ),
-                        child: Row(
-                          children: [
-                            const Icon(Icons.check_circle, color: AppTheme.accentColor, size: 20),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Text(
-                                RuleCondition(type: _selectedType!, value: _value).description,
-                                style: const TextStyle(fontWeight: FontWeight.w600),
-                              ),
+                        child: Row(children: [
+                          const Icon(Icons.check_circle, color: AppTheme.accentColor, size: 18),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              RuleCondition(type: _selectedType!, value: _value).description,
+                              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
                             ),
-                          ],
-                        ),
+                          ),
+                        ]),
                       ),
                     ],
 
@@ -547,248 +662,254 @@ class _ConditionBuilderSheetState extends State<_ConditionBuilderSheet> {
     );
   }
 
+  // ── Helpers ───────────────────────────────────────────────────────────────
+
+  bool _canSave() {
+    if (_selectedType == null) return false;
+    if (_needsValue(_selectedType!) && _valueController.text.isEmpty) return false;
+    return true;
+  }
+
   String _getTypeName(RuleConditionType type) {
     switch (type) {
-      case RuleConditionType.rsiBelow: return 'RSI Below';
-      case RuleConditionType.rsiAbove: return 'RSI Above';
-      case RuleConditionType.priceAboveSma: return 'Above SMA';
-      case RuleConditionType.priceBelowSma: return 'Below SMA';
-      case RuleConditionType.priceAboveEma: return 'Above EMA';
-      case RuleConditionType.priceBelowEma: return 'Below EMA';
-      case RuleConditionType.macdCrossover: return 'Bullish Cross';
-      case RuleConditionType.macdCrossunder: return 'Bearish Cross';
-      case RuleConditionType.volumeSpike: return 'Volume Spike';
-      case RuleConditionType.priceNear52WeekLow: return 'Near 52W Low';
-      case RuleConditionType.priceNear52WeekHigh: return 'Near 52W High';
-      case RuleConditionType.bollingerBreakout: return 'BB Breakout';
-      case RuleConditionType.priceChangeAbove: return 'Change Above';
-      case RuleConditionType.priceChangeBelow: return 'Change Below';
-      case RuleConditionType.momentum6Month: return '6M Momentum';
-      case RuleConditionType.momentum12Month: return '12M Momentum';
-      case RuleConditionType.nearAllTimeHigh: return 'Near 52W HIGH';
-      case RuleConditionType.breakoutNDayHigh: return 'N-Day Breakout';
-      case RuleConditionType.breakoutHeld: return 'Breakout Held';
-      case RuleConditionType.vcpSetup: return 'VCP Setup';
-      case RuleConditionType.bollingerSqueeze: return 'BB Squeeze';
-      case RuleConditionType.stealthAccumulation: return 'Stealth Accum';
-      case RuleConditionType.obvDivergence: return 'OBV Divergence';
-      case RuleConditionType.oversoldBounce: return 'Oversold Bounce';
-      case RuleConditionType.earningsSurprise: return 'EPS Beat';
-      case RuleConditionType.insiderBuying: return 'Insider Buy';
-      // Event-based rules
-      case RuleConditionType.event52WeekHighCrossover: return '⚡ 52W Crossover';
-      case RuleConditionType.eventVolumeBreakout: return '⚡ Vol Breakout';
-      case RuleConditionType.eventMomentumCrossover: return '⚡ 6M Crossover';
-      // State filter rules
-      case RuleConditionType.stateMomentumPositive: return '📊 Mom > 0';
-      case RuleConditionType.stateVolumeExpanding: return '📊 Vol Expand';
-      case RuleConditionType.stateAboveSma50: return '📊 > SMA50';
-      case RuleConditionType.stateUptrend: return '📊 Uptrend';
-      case RuleConditionType.stateNear52WeekHigh: return '📊 Near 52W';
+      case RuleConditionType.rsiBelow:                    return 'RSI Below';
+      case RuleConditionType.rsiAbove:                    return 'RSI Above';
+      case RuleConditionType.priceAboveSma:               return 'Above SMA';
+      case RuleConditionType.priceBelowSma:               return 'Below SMA';
+      case RuleConditionType.priceAboveEma:               return 'Above EMA';
+      case RuleConditionType.priceBelowEma:               return 'Below EMA';
+      case RuleConditionType.macdCrossover:               return 'Bullish Cross';
+      case RuleConditionType.macdCrossunder:              return 'Bearish Cross';
+      case RuleConditionType.volumeSpike:                 return 'Volume Spike';
+      case RuleConditionType.priceNear52WeekLow:          return 'Near 52W Low';
+      case RuleConditionType.priceNear52WeekHigh:         return 'Near 52W High';
+      case RuleConditionType.bollingerBreakout:           return 'BB Breakout';
+      case RuleConditionType.priceChangeAbove:            return 'Day Change >';
+      case RuleConditionType.priceChangeBelow:            return 'Day Change <';
+      case RuleConditionType.momentum6Month:              return '6M Return >';
+      case RuleConditionType.momentum12Month:             return '12M Return >';
+      case RuleConditionType.nearAllTimeHigh:             return 'Near 52W High';
+      case RuleConditionType.breakoutNDayHigh:            return 'N-Day Breakout';
+      case RuleConditionType.breakoutHeld:                return 'Breakout Held';
+      case RuleConditionType.vcpSetup:                    return 'VCP Setup';
+      case RuleConditionType.bollingerSqueeze:            return 'BB Squeeze';
+      case RuleConditionType.stealthAccumulation:         return 'Stealth Accum';
+      case RuleConditionType.obvDivergence:               return 'OBV Divergence';
+      case RuleConditionType.oversoldBounce:              return 'Oversold Bounce';
+      case RuleConditionType.earningsSurprise:            return 'EPS Beat';
+      case RuleConditionType.insiderBuying:               return 'Director Buy';
+      case RuleConditionType.event52WeekHighCrossover:    return '52W Crossover';
+      case RuleConditionType.eventVolumeBreakout:         return 'Vol Breakout';
+      case RuleConditionType.eventMomentumCrossover:      return '6M Crossover';
+      case RuleConditionType.stateMomentumPositive:       return '6M Mom > 0';
+      case RuleConditionType.stateVolumeExpanding:        return 'Vol Expanding';
+      case RuleConditionType.stateAboveSma50:             return 'Above SMA50';
+      case RuleConditionType.stateUptrend:                return 'Uptrend (20d)';
+      case RuleConditionType.stateNear52WeekHigh:         return 'Near 52W High';
+      case RuleConditionType.announcementWithinDays:      return 'Announcement';
+      case RuleConditionType.earningsWithinDays:          return 'Earnings Ann';
+      case RuleConditionType.directorTradeWithinDays:     return 'Director Trade';
+      case RuleConditionType.capitalRaiseWithinDays:      return 'Capital Raise';
+      case RuleConditionType.marketSensitiveWithinDays:   return 'Price Sensitive';
+      case RuleConditionType.shortInterestAbove:          return 'Short % Above';
+      case RuleConditionType.shortInterestBelow:          return 'Short % Below';
+      case RuleConditionType.shortInterestRising:         return 'SI Rising';
+      case RuleConditionType.daysToCoverAbove:            return 'DTC Above';
+      case RuleConditionType.isNotHalted:                 return 'Not Halted';
+      case RuleConditionType.resumedFromHalt:             return 'Resumed';
     }
   }
 
   bool _needsValue(RuleConditionType type) {
-    return type != RuleConditionType.macdCrossover && 
-           type != RuleConditionType.macdCrossunder &&
-           type != RuleConditionType.bollingerBreakout &&
-           type != RuleConditionType.vcpSetup &&
-           type != RuleConditionType.obvDivergence &&
-           type != RuleConditionType.insiderBuying &&
-           type != RuleConditionType.stateVolumeExpanding &&
-           type != RuleConditionType.stateAboveSma50 &&
-           type != RuleConditionType.stateUptrend;
-    // Note: stateMomentumPositive and stateNear52WeekHigh DO need values
+    const noValue = {
+      RuleConditionType.macdCrossover,
+      RuleConditionType.macdCrossunder,
+      RuleConditionType.bollingerBreakout,
+      RuleConditionType.vcpSetup,
+      RuleConditionType.obvDivergence,
+      RuleConditionType.insiderBuying,
+      RuleConditionType.stateVolumeExpanding,
+      RuleConditionType.stateAboveSma50,
+      RuleConditionType.stateUptrend,
+      RuleConditionType.isNotHalted,
+      RuleConditionType.shortInterestRising,
+    };
+    return !noValue.contains(type);
   }
 
   double _getDefaultValue(RuleConditionType type) {
     switch (type) {
-      case RuleConditionType.rsiBelow: return 30;
-      case RuleConditionType.rsiAbove: return 70;
+      case RuleConditionType.rsiBelow:                    return 30;
+      case RuleConditionType.rsiAbove:                    return 70;
       case RuleConditionType.priceAboveSma:
       case RuleConditionType.priceBelowSma:
       case RuleConditionType.priceAboveEma:
-      case RuleConditionType.priceBelowEma: return 20;
-      case RuleConditionType.volumeSpike: return 2;
+      case RuleConditionType.priceBelowEma:               return 20;
+      case RuleConditionType.volumeSpike:
+      case RuleConditionType.stealthAccumulation:         return 2;
       case RuleConditionType.priceNear52WeekLow:
       case RuleConditionType.priceNear52WeekHigh:
-      case RuleConditionType.nearAllTimeHigh: return 5;
-      case RuleConditionType.priceChangeAbove: return 5;
-      case RuleConditionType.priceChangeBelow: return -5;
+      case RuleConditionType.nearAllTimeHigh:             return 5;
+      case RuleConditionType.priceChangeAbove:            return 5;
+      case RuleConditionType.priceChangeBelow:            return -5;
       case RuleConditionType.momentum6Month:
-      case RuleConditionType.momentum12Month: return 20;
-      case RuleConditionType.breakoutNDayHigh: return 50;
-      case RuleConditionType.breakoutHeld: return 5;
-      case RuleConditionType.bollingerSqueeze: return 5;
-      case RuleConditionType.stealthAccumulation: return 2;
-      case RuleConditionType.oversoldBounce: return 10;
-      case RuleConditionType.earningsSurprise: return 5;
-      // Event-based defaults
-      case RuleConditionType.event52WeekHighCrossover: return 97;
-      case RuleConditionType.eventVolumeBreakout: return 1.5;
-      case RuleConditionType.eventMomentumCrossover: return 10;
-      // State filter defaults
-      case RuleConditionType.stateMomentumPositive: return 5;
-      case RuleConditionType.stateVolumeExpanding: return 0;
-      case RuleConditionType.stateAboveSma50: return 0;
-      case RuleConditionType.stateUptrend: return 0;
-      case RuleConditionType.stateNear52WeekHigh: return 95;
-      default: return 0;
+      case RuleConditionType.momentum12Month:             return 20;
+      case RuleConditionType.breakoutNDayHigh:            return 50;
+      case RuleConditionType.breakoutHeld:                return 5;
+      case RuleConditionType.bollingerSqueeze:            return 5;
+      case RuleConditionType.oversoldBounce:              return 10;
+      case RuleConditionType.earningsSurprise:            return 5;
+      case RuleConditionType.event52WeekHighCrossover:    return 97;
+      case RuleConditionType.eventVolumeBreakout:         return 1.5;
+      case RuleConditionType.eventMomentumCrossover:      return 10;
+      case RuleConditionType.stateMomentumPositive:       return 5;
+      case RuleConditionType.stateNear52WeekHigh:         return 95;
+      case RuleConditionType.announcementWithinDays:      return 7;
+      case RuleConditionType.earningsWithinDays:          return 14;
+      case RuleConditionType.directorTradeWithinDays:     return 30;
+      case RuleConditionType.capitalRaiseWithinDays:      return 14;
+      case RuleConditionType.marketSensitiveWithinDays:   return 7;
+      case RuleConditionType.shortInterestAbove:          return 5;
+      case RuleConditionType.shortInterestBelow:          return 3;
+      case RuleConditionType.daysToCoverAbove:            return 5;
+      case RuleConditionType.resumedFromHalt:             return 3;
+      default:                                            return 0;
     }
   }
 
   String _getValueLabel(RuleConditionType type) {
     switch (type) {
       case RuleConditionType.rsiBelow:
-      case RuleConditionType.rsiAbove: return 'RSI Level';
+      case RuleConditionType.rsiAbove:                    return 'RSI Level (0–100)';
       case RuleConditionType.priceAboveSma:
       case RuleConditionType.priceBelowSma:
       case RuleConditionType.priceAboveEma:
       case RuleConditionType.priceBelowEma:
-      case RuleConditionType.breakoutNDayHigh: return 'Period (days)';
+      case RuleConditionType.breakoutNDayHigh:            return 'Period (days)';
       case RuleConditionType.volumeSpike:
-      case RuleConditionType.stealthAccumulation: return 'Volume Multiplier';
+      case RuleConditionType.stealthAccumulation:         return 'Volume Multiplier (×avg)';
       case RuleConditionType.priceNear52WeekLow:
       case RuleConditionType.priceNear52WeekHigh:
-      case RuleConditionType.nearAllTimeHigh:
-      case RuleConditionType.bollingerSqueeze: return 'Within %';
+      case RuleConditionType.nearAllTimeHigh:             return 'Within % of range';
+      case RuleConditionType.bollingerSqueeze:            return 'BB Width % threshold';
       case RuleConditionType.priceChangeAbove:
-      case RuleConditionType.priceChangeBelow:
-      case RuleConditionType.momentum6Month:
-      case RuleConditionType.momentum12Month:
-      case RuleConditionType.oversoldBounce:
-      case RuleConditionType.earningsSurprise: return 'Threshold %';
-      case RuleConditionType.breakoutHeld: return 'Days Held';
-      default: return 'Value';
+      case RuleConditionType.priceChangeBelow:            return 'Day change %';
+      case RuleConditionType.momentum6Month:              return '6-month return threshold (%)';
+      case RuleConditionType.momentum12Month:             return '12-month return threshold (%)';
+      case RuleConditionType.breakoutHeld:                return 'Days held above breakout';
+      case RuleConditionType.oversoldBounce:              return 'Drop % in prior 3 days';
+      case RuleConditionType.earningsSurprise:            return 'EPS beat threshold (%)';
+      case RuleConditionType.event52WeekHighCrossover:    return '% of 52W high (e.g. 97 = within 3%)';
+      case RuleConditionType.eventVolumeBreakout:         return 'Volume multiplier trigger';
+      case RuleConditionType.eventMomentumCrossover:      return '6M return crossing above (%)';
+      case RuleConditionType.stateMomentumPositive:       return '6M return must exceed (%)';
+      case RuleConditionType.stateNear52WeekHigh:         return '% of 52W high (e.g. 95 = within 5%)';
+      case RuleConditionType.announcementWithinDays:      return 'Any announcement within N days';
+      case RuleConditionType.earningsWithinDays:          return 'Earnings announcement within N days';
+      case RuleConditionType.directorTradeWithinDays:     return 'Director on-market trade within N days';
+      case RuleConditionType.capitalRaiseWithinDays:      return 'Capital raise within N days';
+      case RuleConditionType.marketSensitiveWithinDays:   return 'Price-sensitive announcement within N days';
+      case RuleConditionType.shortInterestAbove:          return 'Short interest % of float above';
+      case RuleConditionType.shortInterestBelow:          return 'Short interest % of float below';
+      case RuleConditionType.daysToCoverAbove:            return 'Days to cover (DTC) above';
+      case RuleConditionType.resumedFromHalt:             return 'Resumed from halt within N days';
+      default:                                            return 'Value';
     }
   }
 
-  double _getMinValue(RuleConditionType type) {
+  String _getValueSuffix(RuleConditionType type) {
     switch (type) {
-      case RuleConditionType.rsiBelow:
-      case RuleConditionType.rsiAbove: return 0;
-      case RuleConditionType.priceAboveSma:
-      case RuleConditionType.priceBelowSma:
-      case RuleConditionType.priceAboveEma:
-      case RuleConditionType.priceBelowEma: return 5;
       case RuleConditionType.volumeSpike:
-      case RuleConditionType.stealthAccumulation: return 1;
-      case RuleConditionType.priceNear52WeekLow:
-      case RuleConditionType.priceNear52WeekHigh:
-      case RuleConditionType.nearAllTimeHigh:
-      case RuleConditionType.bollingerSqueeze: return 1;
-      case RuleConditionType.priceChangeAbove:
-      case RuleConditionType.momentum6Month:
-      case RuleConditionType.momentum12Month:
-      case RuleConditionType.earningsSurprise: return 1;
-      case RuleConditionType.priceChangeBelow: return -20;
-      case RuleConditionType.breakoutNDayHigh: return 10;
-      case RuleConditionType.breakoutHeld: return 1;
-      case RuleConditionType.oversoldBounce: return 5;
-      default: return 0;
-    }
-  }
-
-  double _getMaxValue(RuleConditionType type) {
-    switch (type) {
-      case RuleConditionType.rsiBelow:
-      case RuleConditionType.rsiAbove: return 100;
-      case RuleConditionType.priceAboveSma:
-      case RuleConditionType.priceBelowSma:
-      case RuleConditionType.priceAboveEma:
-      case RuleConditionType.priceBelowEma: return 200;
-      case RuleConditionType.volumeSpike:
-      case RuleConditionType.stealthAccumulation: return 10;
-      case RuleConditionType.priceNear52WeekLow:
-      case RuleConditionType.priceNear52WeekHigh:
-      case RuleConditionType.nearAllTimeHigh:
-      case RuleConditionType.bollingerSqueeze: return 20;
-      case RuleConditionType.priceChangeAbove: return 20;
-      case RuleConditionType.priceChangeBelow: return -1;
-      case RuleConditionType.momentum6Month:
-      case RuleConditionType.momentum12Month: return 100;
-      case RuleConditionType.breakoutNDayHigh: return 200;
-      case RuleConditionType.breakoutHeld: return 20;
-      case RuleConditionType.oversoldBounce: return 30;
-      case RuleConditionType.earningsSurprise: return 50;
-      default: return 100;
-    }
-  }
-
-  int _getDivisions(RuleConditionType type) {
-    switch (type) {
-      case RuleConditionType.rsiBelow:
-      case RuleConditionType.rsiAbove: return 20;
-      case RuleConditionType.priceAboveSma:
-      case RuleConditionType.priceBelowSma:
-      case RuleConditionType.priceAboveEma:
-      case RuleConditionType.priceBelowEma: return 39;
-      case RuleConditionType.volumeSpike:
-      case RuleConditionType.stealthAccumulation: return 18;
+      case RuleConditionType.stealthAccumulation:
+      case RuleConditionType.eventVolumeBreakout:         return '×';
       case RuleConditionType.priceNear52WeekLow:
       case RuleConditionType.priceNear52WeekHigh:
       case RuleConditionType.nearAllTimeHigh:
       case RuleConditionType.bollingerSqueeze:
       case RuleConditionType.priceChangeAbove:
       case RuleConditionType.priceChangeBelow:
-      case RuleConditionType.breakoutHeld: return 19;
       case RuleConditionType.momentum6Month:
-      case RuleConditionType.momentum12Month: return 20;
-      case RuleConditionType.breakoutNDayHigh: return 19;
-      case RuleConditionType.oversoldBounce: return 25;
-      case RuleConditionType.earningsSurprise: return 10;
-      default: return 10;
+      case RuleConditionType.momentum12Month:
+      case RuleConditionType.oversoldBounce:
+      case RuleConditionType.earningsSurprise:
+      case RuleConditionType.event52WeekHighCrossover:
+      case RuleConditionType.eventMomentumCrossover:
+      case RuleConditionType.stateMomentumPositive:
+      case RuleConditionType.stateNear52WeekHigh:
+      case RuleConditionType.shortInterestAbove:
+      case RuleConditionType.shortInterestBelow:          return '%';
+      case RuleConditionType.announcementWithinDays:
+      case RuleConditionType.earningsWithinDays:
+      case RuleConditionType.directorTradeWithinDays:
+      case RuleConditionType.capitalRaiseWithinDays:
+      case RuleConditionType.marketSensitiveWithinDays:
+      case RuleConditionType.breakoutNDayHigh:
+      case RuleConditionType.breakoutHeld:
+      case RuleConditionType.priceAboveSma:
+      case RuleConditionType.priceBelowSma:
+      case RuleConditionType.priceAboveEma:
+      case RuleConditionType.priceBelowEma:
+      case RuleConditionType.daysToCoverAbove:
+      case RuleConditionType.resumedFromHalt:             return 'd';
+      default:                                            return '';
     }
+  }
+
+  String _formatRaw(double v) {
+    // Returns a clean string for text field initialisation
+    if (v == v.roundToDouble()) return v.toInt().toString();
+    return v.toStringAsFixed(1);
   }
 
   String _formatValue(RuleConditionType type, double value) {
-    switch (type) {
-      case RuleConditionType.volumeSpike:
-      case RuleConditionType.stealthAccumulation: return '${value.toStringAsFixed(1)}x';
-      case RuleConditionType.priceNear52WeekLow:
-      case RuleConditionType.priceNear52WeekHigh:
-      case RuleConditionType.nearAllTimeHigh:
-      case RuleConditionType.bollingerSqueeze:
-      case RuleConditionType.priceChangeAbove:
-      case RuleConditionType.priceChangeBelow:
-      case RuleConditionType.momentum6Month:
-      case RuleConditionType.momentum12Month:
-      case RuleConditionType.oversoldBounce:
-      case RuleConditionType.earningsSurprise: return '${value.toStringAsFixed(0)}%';
-      case RuleConditionType.breakoutNDayHigh:
-      case RuleConditionType.breakoutHeld: return '${value.toStringAsFixed(0)}d';
-      default: return value.toStringAsFixed(0);
-    }
+    final suffix = _getValueSuffix(type);
+    final raw = _formatRaw(value);
+    return '$raw$suffix';
   }
 
   List<double> _getPresets(RuleConditionType type) {
     switch (type) {
-      case RuleConditionType.rsiBelow: return [20, 30, 40];
-      case RuleConditionType.rsiAbove: return [60, 70, 80];
+      case RuleConditionType.rsiBelow:                    return [20, 30, 40];
+      case RuleConditionType.rsiAbove:                    return [60, 70, 80];
       case RuleConditionType.priceAboveSma:
       case RuleConditionType.priceBelowSma:
       case RuleConditionType.priceAboveEma:
-      case RuleConditionType.priceBelowEma: return [10, 20, 50, 200];
+      case RuleConditionType.priceBelowEma:               return [10, 20, 50, 200];
       case RuleConditionType.volumeSpike:
-      case RuleConditionType.stealthAccumulation: return [1.5, 2, 3, 5];
+      case RuleConditionType.stealthAccumulation:         return [1.5, 2, 3, 5];
       case RuleConditionType.priceNear52WeekLow:
       case RuleConditionType.priceNear52WeekHigh:
       case RuleConditionType.nearAllTimeHigh:
-      case RuleConditionType.bollingerSqueeze: return [5, 10, 15];
-      case RuleConditionType.priceChangeAbove: return [3, 5, 10];
-      case RuleConditionType.priceChangeBelow: return [-3, -5, -10];
+      case RuleConditionType.bollingerSqueeze:            return [3, 5, 10, 15];
+      case RuleConditionType.priceChangeAbove:            return [2, 5, 10];
+      case RuleConditionType.priceChangeBelow:            return [-2, -5, -10];
       case RuleConditionType.momentum6Month:
-      case RuleConditionType.momentum12Month: return [10, 20, 30, 50];
-      case RuleConditionType.breakoutNDayHigh: return [20, 50, 100];
-      case RuleConditionType.breakoutHeld: return [3, 5, 10];
-      case RuleConditionType.oversoldBounce: return [10, 15, 20];
-      case RuleConditionType.earningsSurprise: return [5, 10, 20];
-      default: return [];
+      case RuleConditionType.momentum12Month:             return [10, 20, 30, 50];
+      case RuleConditionType.breakoutNDayHigh:            return [20, 50, 100];
+      case RuleConditionType.breakoutHeld:                return [3, 5, 10];
+      case RuleConditionType.oversoldBounce:              return [10, 15, 20];
+      case RuleConditionType.earningsSurprise:            return [5, 10, 20];
+      case RuleConditionType.eventVolumeBreakout:         return [1.5, 2, 3];
+      case RuleConditionType.eventMomentumCrossover:
+      case RuleConditionType.stateMomentumPositive:       return [0, 5, 10, 20];
+      case RuleConditionType.stateNear52WeekHigh:
+      case RuleConditionType.event52WeekHighCrossover:    return [90, 95, 97];
+      case RuleConditionType.announcementWithinDays:
+      case RuleConditionType.marketSensitiveWithinDays:   return [3, 7, 14, 30];
+      case RuleConditionType.earningsWithinDays:          return [7, 14, 30, 60];
+      case RuleConditionType.directorTradeWithinDays:     return [7, 14, 30, 60, 90];
+      case RuleConditionType.capitalRaiseWithinDays:      return [7, 14, 30];
+      case RuleConditionType.shortInterestAbove:          return [3, 5, 10, 15];
+      case RuleConditionType.shortInterestBelow:          return [1, 2, 3, 5];
+      case RuleConditionType.daysToCoverAbove:            return [3, 5, 10];
+      case RuleConditionType.resumedFromHalt:             return [1, 3, 7];
+      default:                                            return [];
     }
   }
 
   void _save() {
     if (_selectedType == null) return;
-    widget.onSave(RuleCondition(type: _selectedType!, value: _value));
+    final parsed = double.tryParse(_valueController.text) ?? _value;
+    widget.onSave(RuleCondition(type: _selectedType!, value: _needsValue(_selectedType!) ? parsed : 0));
   }
 }

@@ -1,5 +1,6 @@
 import '../models/stock.dart';
 import '../models/scan_rule.dart';
+import 'fundamental_evaluator.dart';
 import 'dart:math' as math;
 
 class ScanEngineService {
@@ -493,7 +494,48 @@ class ScanEngineService {
         // condition.value is the threshold (e.g., 95 means within 5% of high)
         final thresholdPct = condition.value / 100; // e.g., 95 -> 0.95
         return currentPriceHigh >= highPrice * thresholdPct;
+
+      // === FUNDAMENTAL CONDITIONS ===
+      // These are evaluated async by FundamentalEvaluator, not here.
+      // Return true so they don't block the sync evaluation.
+      // The actual check happens in FundamentalEvaluator.evaluate() 
+      // which is called after the technical checks pass.
+      case RuleConditionType.announcementWithinDays:
+      case RuleConditionType.earningsWithinDays:
+      case RuleConditionType.directorTradeWithinDays:
+      case RuleConditionType.capitalRaiseWithinDays:
+      case RuleConditionType.marketSensitiveWithinDays:
+      case RuleConditionType.shortInterestAbove:
+      case RuleConditionType.shortInterestBelow:
+      case RuleConditionType.shortInterestRising:
+      case RuleConditionType.daysToCoverAbove:
+      case RuleConditionType.isNotHalted:
+      case RuleConditionType.resumedFromHalt:
+        return true; // Deferred to async FundamentalEvaluator
     }
+  }
+
+  /// Evaluate rule including fundamental conditions (async)
+  /// Call this instead of evaluateRule/evaluateHybridRule when the rule
+  /// contains fundamental conditions. Technical conditions are checked first
+  /// (sync, fast), then fundamental conditions only if technicals pass.
+  static Future<bool> evaluateRuleAsync(
+    Stock stock, ScanRule rule, 
+    {List<double>? prices, List<int>? volumes}
+  ) async {
+    // Step 1: Technical evaluation (sync, fast)
+    final technicalPassed = isHybridRule(rule)
+        ? evaluateHybridRule(stock, rule, prices: prices, volumes: volumes)
+        : evaluateRule(stock, rule, prices: prices, volumes: volumes);
+    
+    if (!technicalPassed) return false;
+    
+    // Step 2: Fundamental evaluation (async, only if technical passed)
+    if (hasFundamentalConditions(rule)) {
+      return FundamentalEvaluator.evaluateAll(rule, stock);
+    }
+    
+    return true;
   }
 
   /// Calculate Average True Range

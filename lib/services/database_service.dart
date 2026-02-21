@@ -14,8 +14,14 @@ import 'error_reporting_service.dart';
 /// then uses SQLite going forward. SharedPreferences kept for small settings only.
 class DatabaseService {
   static Database? _db;
-  static const int _dbVersion = 1;
+  static const int _dbVersion = 2;
   static const String _dbName = 'asx_radar.db';
+
+  /// Public accessor for database instance (used by fundamental data services)
+  static Future<Database?> getDatabase() async {
+    if (_db == null) await initialize();
+    return _db;
+  }
 
   /// Initialize database - call once at app startup
   static Future<void> initialize() async {
@@ -91,11 +97,61 @@ class DatabaseService {
     // Create indexes for common queries
     await db.execute('CREATE INDEX idx_alerts_created ON alerts(created_at DESC)');
     await db.execute('CREATE INDEX idx_stock_cache_updated ON stock_cache(updated_at)');
+
+    // === Phase 2: Fundamental data tables ===
+    await _createFundamentalTables(db);
+  }
+
+  /// Create tables for fundamental data (announcements, short interest, halt status)
+  static Future<void> _createFundamentalTables(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS announcements (
+        id TEXT PRIMARY KEY,
+        symbol TEXT NOT NULL,
+        title TEXT NOT NULL,
+        release_date TEXT NOT NULL,
+        category INTEGER NOT NULL,
+        is_market_sensitive INTEGER DEFAULT 0,
+        document_url TEXT,
+        num_pages INTEGER,
+        fetched_at TEXT NOT NULL
+      )
+    ''');
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_ann_symbol ON announcements(symbol)');
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_ann_date ON announcements(release_date)');
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_ann_category ON announcements(category)');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS short_interest (
+        symbol TEXT NOT NULL,
+        trade_date TEXT NOT NULL,
+        short_positions INTEGER NOT NULL,
+        total_issued INTEGER NOT NULL,
+        short_percent REAL NOT NULL,
+        fetched_at TEXT NOT NULL,
+        PRIMARY KEY (symbol, trade_date)
+      )
+    ''');
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_short_symbol ON short_interest(symbol)');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS halt_status (
+        symbol TEXT PRIMARY KEY,
+        is_halted INTEGER DEFAULT 0,
+        halt_type TEXT,
+        halt_date TEXT,
+        resume_date TEXT,
+        resume_announcement_id TEXT
+      )
+    ''');
   }
 
   static Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
-    // Future migrations go here
-    // if (oldVersion < 2) { ... }
+    if (oldVersion < 2) {
+      // v2: Add fundamental data tables (announcements, short interest, halt status)
+      await _createFundamentalTables(db);
+      print('DatabaseService: Migrated to v2 (fundamental data tables)');
+    }
   }
 
   /// Get database instance (auto-initializes)
@@ -356,7 +412,7 @@ class DatabaseService {
       final database = await db;
       
       // Check if migration already done
-      final migrated = await database.query('settings', where: "key = ?", whereArgs: ['migration_done']);
+      final migrated = await database.query('settings', where: 'key = ?', whereArgs: ['migration_done']);
       if (migrated.isNotEmpty) return false;
       
       // Import from StorageService (SharedPreferences)

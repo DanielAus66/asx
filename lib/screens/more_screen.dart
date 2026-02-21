@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/subscription_service.dart';
+import '../services/scan_scheduler_service.dart';
 import '../utils/theme.dart';
 import 'settings_screen.dart';
 import 'alerts_screen.dart';
 import 'holdings_scanner_screen.dart';
+import 'background_scanner_screen.dart';
 import 'paywall_screen.dart';
 
 /// More tab — settings, account, less-frequent features
@@ -40,6 +42,7 @@ class MoreScreen extends StatelessWidget {
                   subtitle: 'Price & signal notifications',
                   onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AlertsScreen())),
                 ),
+                _buildBackgroundScannerItem(context),
                 _buildMenuItem(
                   context,
                   icon: Icons.account_balance_wallet_outlined,
@@ -121,6 +124,74 @@ class MoreScreen extends StatelessWidget {
           const Text('All features unlocked', style: TextStyle(color: AppTheme.textSecondaryColor, fontSize: 13)),
         ],
       ),
+    );
+  }
+
+  Widget _buildBackgroundScannerItem(BuildContext context) {
+    return Consumer<ScanSchedulerService>(
+      builder: (context, scheduler, _) {
+        final isOn = scheduler.enabled && scheduler.isServiceRunning;
+        return Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const BackgroundScannerScreen()),
+            ),
+            borderRadius: BorderRadius.circular(12),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 4),
+              child: Row(children: [
+                Container(
+                  width: 40, height: 40,
+                  decoration: BoxDecoration(
+                    color: isOn
+                        ? AppTheme.accentColor.withValues(alpha: 0.12)
+                        : AppTheme.cardColor,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Icon(
+                    isOn ? Icons.radar : Icons.radar_outlined,
+                    color: isOn ? AppTheme.accentColor : AppTheme.textSecondaryColor,
+                    size: 20,
+                  ),
+                ),
+                const SizedBox(width: 14),
+                Expanded(child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('Background Scanner',
+                        style: TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
+                    Text(
+                      isOn
+                          ? 'Active · ${scheduler.interval.label}'
+                          : 'Off — tap to enable notifications',
+                      style: TextStyle(
+                          fontSize: 12,
+                          color: isOn
+                              ? AppTheme.accentColor
+                              : AppTheme.textSecondaryColor),
+                    ),
+                  ],
+                )),
+                if (isOn)
+                  Container(
+                    width: 8, height: 8,
+                    decoration: BoxDecoration(
+                      color: AppTheme.successColor,
+                      shape: BoxShape.circle,
+                      boxShadow: [
+                        BoxShadow(color: AppTheme.successColor.withValues(alpha: 0.5), blurRadius: 4)
+                      ],
+                    ),
+                  )
+                else
+                  const Icon(Icons.chevron_right, color: AppTheme.textTertiaryColor, size: 20),
+              ]),
+            ),
+          ),
+        );
+      },
     );
   }
 

@@ -19,6 +19,7 @@ import 'stock_detail_sheet.dart';
 import 'search_screen.dart';
 import 'settings_screen.dart';
 import 'paywall_screen.dart';
+import 'backtest_screen.dart';
 
 class TopSetup {
   final Stock stock;
@@ -43,12 +44,8 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   List<TopSetup> _topSetups = [];
-  List<Holding> _holdings = [];
   bool _isLoadingSetups = true;
-  bool _isLoadingHoldings = true;
   String? _userName;
-  double _portfolioGain = 0;
-  double _portfolioValue = 0;
 
   // Collapsible sections
   bool _watchlistExpanded = true;
@@ -84,47 +81,31 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _loadData() async {
-    _loadHoldings();
-    _loadTopSetups();
     final provider = Provider.of<AppProvider>(context, listen: false);
+    provider.loadHoldings();
+    _loadTopSetups();
     provider.refreshData();
   }
 
-  Future<void> _loadHoldings() async {
-    final holdings = await StorageService.loadHoldings();
-    if (holdings.isNotEmpty) {
-      // Fetch live prices for all holdings
-      final symbols = holdings.map((h) => h.symbol).toList();
-      try {
-        final stocks = await ApiService.fetchStocks(symbols);
-        for (final stock in stocks) {
-          final idx = holdings.indexWhere((h) => h.symbol == stock.symbol);
-          if (idx != -1) holdings[idx] = holdings[idx].copyWith(currentPrice: stock.currentPrice);
-        }
-        // Persist updated prices
-        await StorageService.saveHoldings(holdings);
-      } catch (_) {}
-    }
-    double totalGain = 0;
-    double totalValue = 0;
-    for (final h in holdings) {
-      totalGain += h.unrealizedGain;
-      totalValue += h.marketValue;
-    }
-    if (mounted) setState(() {
-      _holdings = holdings;
-      _portfolioGain = totalGain;
-      _portfolioValue = totalValue;
-      _isLoadingHoldings = false;
-    });
-  }
-
   Future<void> _loadTopSetups() async {
+    if (!mounted) return;
     setState(() => _isLoadingSetups = true);
+
     final provider = Provider.of<AppProvider>(context, listen: false);
 
-    // Show persisted scan results immediately
+    // ── Tier 1: Wait for provider to finish initializing, then check cache ──
+    // Provider.initialize() loads persisted scan results asynchronously.
+    // Give it up to 2s to finish before we decide the cache is empty.
+    if (provider.isLoading) {
+      for (int i = 0; i < 20; i++) {
+        await Future.delayed(const Duration(milliseconds: 100));
+        if (!mounted) return;
+        if (!provider.isLoading) break;
+      }
+    }
+
     if (provider.scanResults.isNotEmpty) {
+      // Show persisted results from last session immediately — no network needed
       final cached = provider.scanResults.take(5).map((r) => TopSetup(
         stock: r.stock,
         signalType: _getSignalType(r.ruleName),
@@ -133,10 +114,59 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         sparklineData: null,
       )).toList();
       if (mounted) setState(() { _topSetups = cached; _isLoadingSetups = false; });
+      // Still run a background refresh so the list stays current
+      _backgroundRefreshSetups(provider);
       return;
     }
 
+    // ── Tier 2: Quick quote-only scan — completes in ~2s ───────────────────
+    // Uses rules that need only current price/volume data (no historical fetch).
+    // Scans the user's watchlist first, then top 20 ASX stocks.
     final activeRules = provider.activeRules;
+    if (activeRules.isNotEmpty) {
+      final quickRules = activeRules.where(_isQuickRule).toList();
+      if (quickRules.isNotEmpty) {
+        try {
+          // Watchlist symbols first — most relevant to the user
+          final watchlistSymbols = provider.watchlist.map((w) => w.symbol).toList();
+          final fallbackSymbols = ApiService.majorStocks
+              .where((s) => !watchlistSymbols.contains(s))
+              .take(20)
+              .toList();
+          final symbols = [...watchlistSymbols, ...fallbackSymbols];
+
+          final stocks = await ApiService.fetchStocks(symbols);
+          final setups = <TopSetup>[];
+
+          for (final stock in stocks) {
+            if (stock.currentPrice <= 0) continue;
+            for (final rule in quickRules) {
+              if (ScanEngineService.evaluateRule(stock, rule)) {
+                setups.add(TopSetup(
+                  stock: stock,
+                  signalType: _getSignalType(rule.name),
+                  signalDescription: _getSignalDescription(rule),
+                  detectedAt: DateTime.now(),
+                  sparklineData: null,
+                ));
+                break;
+              }
+            }
+            if (setups.length >= 5) break;
+          }
+
+          if (mounted && setups.isNotEmpty) {
+            setState(() { _topSetups = setups; _isLoadingSetups = false; });
+            // Kick off a deeper background scan to improve quality
+            _backgroundRefreshSetups(provider);
+            return;
+          }
+        } catch (_) {}
+      }
+    }
+
+    // ── Tier 3: Full historical scan (existing behaviour) ──────────────────
+    // Only runs if tiers 1 & 2 both came up empty.
     if (activeRules.isEmpty) {
       if (mounted) setState(() { _topSetups = []; _isLoadingSetups = false; });
       return;
@@ -162,10 +192,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         if (stock.currentPrice <= 0) continue;
         try {
           final priceData = await ApiService.fetchHistoricalPricesAndVolumes(stock.symbol, days: requiredDays);
-          final prices = (priceData['prices'] as List?)?.map((p) => (p as num).toDouble()).toList() ?? [];
-          final volumes = (priceData['volumes'] as List?)?.map((v) => (v as num).toInt()).toList() ?? [];
-          final highs = (priceData['highs'] as List?)?.map((h) => (h as num).toDouble()).toList();
-          final lows = (priceData['lows'] as List?)?.map((l) => (l as num).toDouble()).toList();
+          final prices = (priceData['prices'])?.map((p) => (p as num).toDouble()).toList() ?? [];
+          final volumes = (priceData['volumes'])?.map((v) => (v as num).toInt()).toList() ?? [];
+          final highs = (priceData['highs'])?.map((h) => (h as num).toDouble()).toList();
+          final lows = (priceData['lows'])?.map((l) => (l as num).toDouble()).toList();
           if (prices.isEmpty) continue;
           final enrichedStock = await TechnicalIndicatorsService.addIndicators(stock, prices, highs: highs, lows: lows);
           for (final rule in activeRules) {
@@ -185,6 +215,76 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     } catch (e) {
       if (mounted) setState(() { _topSetups = []; _isLoadingSetups = false; });
     }
+  }
+
+  /// Runs in the background after a cached or quick result is shown.
+  /// Updates signals silently — no loading spinner shown to the user.
+  Future<void> _backgroundRefreshSetups(AppProvider provider) async {
+    final activeRules = provider.activeRules;
+    if (activeRules.isEmpty || !mounted) return;
+
+    try {
+      int requiredDays = 60;
+      for (final rule in activeRules) {
+        for (final condition in rule.conditions) {
+          if (condition.type == RuleConditionType.event52WeekHighCrossover || condition.type == RuleConditionType.stateNear52WeekHigh) {
+            requiredDays = 280;
+          } else if (condition.type == RuleConditionType.momentum6Month || condition.type == RuleConditionType.stateMomentumPositive || condition.type == RuleConditionType.eventMomentumCrossover) {
+            if (requiredDays < 180) requiredDays = 180;
+          } else if (condition.type == RuleConditionType.momentum12Month) {
+            requiredDays = 280;
+          }
+        }
+      }
+      final setups = <TopSetup>[];
+      final watchlistSymbols = provider.watchlist.map((w) => w.symbol).toList();
+      final topStocks = [
+        ...watchlistSymbols,
+        ...ApiService.majorStocks.where((s) => !watchlistSymbols.contains(s)),
+      ].take(50).toList();
+      final stocks = await ApiService.fetchStocks(topStocks);
+      for (final stock in stocks) {
+        if (stock.currentPrice <= 0) continue;
+        try {
+          final priceData = await ApiService.fetchHistoricalPricesAndVolumes(stock.symbol, days: requiredDays);
+          final prices = (priceData['prices'])?.map((p) => (p as num).toDouble()).toList() ?? [];
+          final volumes = (priceData['volumes'])?.map((v) => (v as num).toInt()).toList() ?? [];
+          final highs = (priceData['highs'])?.map((h) => (h as num).toDouble()).toList();
+          final lows = (priceData['lows'])?.map((l) => (l as num).toDouble()).toList();
+          if (prices.isEmpty) continue;
+          final enrichedStock = await TechnicalIndicatorsService.addIndicators(stock, prices, highs: highs, lows: lows);
+          for (final rule in activeRules) {
+            final matches = ScanEngineService.isHybridRule(rule)
+              ? ScanEngineService.evaluateHybridRule(enrichedStock, rule, prices: prices, volumes: volumes)
+              : ScanEngineService.evaluateRule(enrichedStock, rule, prices: prices, volumes: volumes);
+            if (matches) {
+              final sparkline = prices.length > 20 ? prices.sublist(prices.length - 20) : prices;
+              setups.add(TopSetup(stock: enrichedStock, signalType: _getSignalType(rule.name), signalDescription: _getSignalDescription(rule), detectedAt: DateTime.now(), sparklineData: sparkline));
+              break;
+            }
+          }
+          if (setups.length >= 5) break;
+        } catch (_) {}
+      }
+      // Only update if we found better results
+      if (mounted && setups.isNotEmpty) {
+        setState(() => _topSetups = setups);
+      }
+    } catch (_) {}
+  }
+
+  /// Rules that can be evaluated with quote data only — no historical price fetch needed.
+  static bool _isQuickRule(ScanRule rule) {
+    const quickTypes = {
+      RuleConditionType.priceChangeAbove,
+      RuleConditionType.priceChangeBelow,
+      RuleConditionType.priceNear52WeekHigh,
+      RuleConditionType.priceNear52WeekLow,
+      RuleConditionType.nearAllTimeHigh,
+      RuleConditionType.volumeSpike,
+      RuleConditionType.stealthAccumulation,
+    };
+    return rule.conditions.every((c) => quickTypes.contains(c.type));
   }
 
   // ──────────────────────────────────────────────
@@ -274,11 +374,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void _showWatchlistItemMenu(BuildContext context, AppProvider provider, SubscriptionService subscription, WatchlistItem item) {
     showModalBottomSheet(
       context: context, backgroundColor: AppTheme.cardColor,
+      isScrollControlled: true,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
       builder: (ctx) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.75),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(16),
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
             // Header
             Row(children: [
               Text(item.displaySymbol, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
@@ -328,8 +431,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               trailing: subscription.isPro ? const Icon(Icons.chevron_right, size: 18) : const Icon(Icons.lock, size: 14, color: AppTheme.textTertiaryColor),
               onTap: () {
                 Navigator.pop(ctx);
-                if (subscription.isPro) _showEditCapitalDialog(context, provider, item);
-                else PaywallScreen.show(context, feature: ProFeature.unlimitedWatchlist);
+                if (subscription.isPro) {
+                  _showEditCapitalDialog(context, provider, item);
+                } else {
+                  PaywallScreen.show(context, feature: ProFeature.unlimitedWatchlist);
+                }
               },
             ),
             ListTile(
@@ -348,7 +454,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               dense: true, contentPadding: EdgeInsets.zero,
               leading: const Icon(Icons.science_outlined, color: AppTheme.accentColor, size: 20),
               title: const Text('Backtest', style: TextStyle(fontSize: 14)),
-              onTap: () { Navigator.pop(ctx); MainScreen.mainKey.currentState?.navigateToScan(segment: 2); },
+              onTap: () { Navigator.pop(ctx); 
+                final rules = provider.activeRules;
+                if (rules.isNotEmpty) {
+                  Navigator.push(context, MaterialPageRoute(builder: (_) => BacktestScreen(autoRules: rules)));
+                } else {
+                  MainScreen.mainKey.currentState?.navigateToScan(segment: 1);
+                }
+              },
             ),
             const Divider(height: 8),
             ListTile(
@@ -358,6 +471,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               onTap: () { Navigator.pop(ctx); provider.removeFromWatchlist(item.symbol); },
             ),
           ]),
+        ),
         ),
       ),
     );
@@ -401,11 +515,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final color = isUp ? AppTheme.successColor : AppTheme.errorColor;
     showModalBottomSheet(
       context: context, backgroundColor: AppTheme.cardColor,
+      isScrollControlled: true,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
       builder: (ctx) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.75),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(16),
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
             Row(children: [
               Text(holding.symbol.replaceAll('.AX', ''), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
               const SizedBox(width: 8),
@@ -459,7 +576,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               dense: true, contentPadding: EdgeInsets.zero,
               leading: const Icon(Icons.science_outlined, color: AppTheme.accentColor, size: 20),
               title: const Text('Backtest', style: TextStyle(fontSize: 14)),
-              onTap: () { Navigator.pop(ctx); MainScreen.mainKey.currentState?.navigateToScan(segment: 2); },
+              onTap: () { Navigator.pop(ctx);
+                final provider = Provider.of<AppProvider>(context, listen: false);
+                final rules = provider.activeRules;
+                if (rules.isNotEmpty) {
+                  Navigator.push(context, MaterialPageRoute(builder: (_) => BacktestScreen(autoRules: rules)));
+                } else {
+                  MainScreen.mainKey.currentState?.navigateToScan(segment: 1);
+                }
+              },
             ),
             const Divider(height: 8),
             ListTile(
@@ -468,12 +593,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               title: const Text('Remove Holding', style: TextStyle(color: AppTheme.errorColor, fontSize: 14)),
               onTap: () async {
                 Navigator.pop(ctx);
-                final updated = List<Holding>.from(_holdings)..removeWhere((h) => h.symbol == holding.symbol);
-                await StorageService.saveHoldings(updated);
-                _loadHoldings();
+                final provider = Provider.of<AppProvider>(context, listen: false);
+                provider.removeHolding(holding.symbol);
               },
             ),
           ]),
+        ),
         ),
       ),
     );
@@ -505,16 +630,108 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               final qty = int.tryParse(qtyController.text) ?? holding.quantity;
               final cost = double.tryParse(costController.text) ?? holding.avgCostBasis;
               if (qty > 0 && cost > 0) {
-                final updated = _holdings.map((h) {
-                  if (h.symbol == holding.symbol) return h.copyWith(quantity: qty, avgCostBasis: cost);
-                  return h;
-                }).toList();
-                await StorageService.saveHoldings(updated);
+                final provider = Provider.of<AppProvider>(context, listen: false);
+                await provider.updateHolding(holding.symbol, quantity: qty, avgCostBasis: cost);
                 Navigator.pop(ctx);
-                _loadHoldings();
               }
             },
             child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showAddHoldingSearch(BuildContext context, AppProvider provider) {
+    final searchController = TextEditingController();
+    List<Stock> searchResults = [];
+    bool isSearching = false;
+
+    showModalBottomSheet(
+      context: context, backgroundColor: AppTheme.surfaceColor,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setSheetState) {
+        return SafeArea(child: Padding(
+          padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(ctx).viewInsets.bottom + 16),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Text('Add Holding', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 16),
+            TextField(
+              controller: searchController, autofocus: true,
+              decoration: InputDecoration(
+                hintText: 'Search ASX symbol or name',
+                prefixIcon: const Icon(Icons.search, size: 20),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              ),
+              onChanged: (q) async {
+                if (q.length < 2) { setSheetState(() => searchResults = []); return; }
+                setSheetState(() => isSearching = true);
+                try {
+                  final results = await provider.searchStocks(q.trim());
+                  if (ctx.mounted) setSheetState(() { searchResults = results; isSearching = false; });
+                } catch (_) {
+                  if (ctx.mounted) setSheetState(() => isSearching = false);
+                }
+              },
+            ),
+            const SizedBox(height: 12),
+            if (isSearching) const Padding(padding: EdgeInsets.all(16), child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 300),
+              child: ListView(
+                shrinkWrap: true,
+                children: searchResults.take(8).map((stock) => ListTile(
+                  dense: true, contentPadding: EdgeInsets.zero,
+                  title: Text(stock.displaySymbol, style: const TextStyle(fontWeight: FontWeight.w600)),
+                  subtitle: Text(stock.name, style: const TextStyle(fontSize: 12, color: AppTheme.textSecondaryColor), overflow: TextOverflow.ellipsis),
+                  trailing: Text(stock.formattedPrice, style: const TextStyle(fontWeight: FontWeight.w500)),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _showAddHoldingDialog(context, provider, stock);
+                  },
+                )).toList(),
+              ),
+            ),
+            if (searchResults.isEmpty && searchController.text.length >= 2 && !isSearching)
+              const Padding(padding: EdgeInsets.all(16), child: Text('No results found', style: TextStyle(color: AppTheme.textSecondaryColor))),
+          ]),
+        ));
+      }),
+    );
+  }
+
+  void _showAddHoldingDialog(BuildContext context, AppProvider provider, Stock stock) {
+    final qtyController = TextEditingController(text: '100');
+    final costController = TextEditingController(text: stock.currentPrice.toStringAsFixed(2));
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.cardColor,
+        title: Text('Add ${stock.displaySymbol} to Holdings'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(controller: qtyController, keyboardType: TextInputType.number, autofocus: true,
+            decoration: const InputDecoration(labelText: 'Quantity', border: OutlineInputBorder())),
+          const SizedBox(height: 12),
+          TextField(controller: costController, keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            decoration: const InputDecoration(labelText: 'Avg Cost Basis', prefixText: '\$ ', border: OutlineInputBorder())),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () async {
+              final qty = int.tryParse(qtyController.text) ?? 100;
+              final cost = double.tryParse(costController.text) ?? stock.currentPrice;
+              if (qty > 0 && cost > 0) {
+                await provider.addHolding(Holding(
+                  symbol: stock.symbol, name: stock.name, quantity: qty,
+                  avgCostBasis: cost, firstPurchased: DateTime.now(), currentPrice: stock.currentPrice,
+                ));
+                if (ctx.mounted) Navigator.pop(ctx);
+              }
+            },
+            child: const Text('Add'),
           ),
         ],
       ),
@@ -588,18 +805,30 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   ],
 
                   // Holdings (collapsible)
-                  if (_holdings.isNotEmpty) ...[
+                  if (provider.holdings.isNotEmpty) ...[
                     SliverToBoxAdapter(child: _buildCollapsibleHeader(
                       title: 'Holdings',
-                      count: _holdings.length,
+                      count: provider.holdings.length,
                       expanded: _holdingsExpanded,
                       onTap: () => setState(() => _holdingsExpanded = !_holdingsExpanded),
-                      subtitle: _isLoadingHoldings ? null : '\$${NumberFormat.compact().format(_portfolioValue)}',
+                      subtitle: '\$${NumberFormat.compact().format(provider.holdingsValue)}',
+                      trailing: GestureDetector(
+                        onTap: () => _showAddHoldingSearch(context, provider),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                          decoration: BoxDecoration(color: AppTheme.cardColor, borderRadius: BorderRadius.circular(6)),
+                          child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                            Icon(Icons.add, size: 14, color: AppTheme.textSecondaryColor),
+                            SizedBox(width: 4),
+                            Text('Add', style: TextStyle(fontSize: 12, color: AppTheme.textSecondaryColor, fontWeight: FontWeight.w500)),
+                          ]),
+                        ),
+                      ),
                     )),
                     if (_holdingsExpanded)
                       SliverList(delegate: SliverChildBuilderDelegate(
-                        (context, i) => _buildHoldingCard(_holdings[i]),
-                        childCount: _holdings.length,
+                        (context, i) => _buildHoldingCard(provider.holdings[i], provider),
+                        childCount: provider.holdings.length,
                       )),
                   ],
 
@@ -668,9 +897,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     bool hasData = false;
     switch (provider.portfolioSource) {
       case PortfolioSource.holdings:
-        gain = _portfolioGain;
-        for (final h in _holdings) { costBasis += h.costBasis; }
-        hasData = _holdings.isNotEmpty;
+        gain = provider.holdingsGain;
+        costBasis = provider.holdingsCostBasis;
+        hasData = provider.holdings.isNotEmpty;
       case PortfolioSource.watchlist:
         for (final item in provider.watchlist) {
           gain += item.dollarGainLoss;
@@ -678,13 +907,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         }
         hasData = provider.watchlist.isNotEmpty;
       case PortfolioSource.both:
-        gain = _portfolioGain;
-        for (final h in _holdings) { costBasis += h.costBasis; }
+        gain = provider.holdingsGain;
+        costBasis = provider.holdingsCostBasis;
         for (final item in provider.watchlist) {
           gain += item.dollarGainLoss;
           costBasis += item.capitalInvested;
         }
-        hasData = _holdings.isNotEmpty || provider.watchlist.isNotEmpty;
+        hasData = provider.holdings.isNotEmpty || provider.watchlist.isNotEmpty;
     }
     final pct = costBasis > 0 ? (gain / costBasis) * 100 : 0.0;
     final gainColor = gain >= 0 ? AppTheme.successColor : AppTheme.errorColor;
@@ -692,24 +921,21 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
       child: Row(children: [
-        // Portfolio card with $ + %
         Expanded(child: Container(
           padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 12),
           decoration: BoxDecoration(color: AppTheme.cardColor, borderRadius: BorderRadius.circular(12)),
           child: Column(children: [
             Text(
-              _isLoadingHoldings ? '...' : !hasData ? '—' : '${gain >= 0 ? '+' : '-'}\$${NumberFormat.compact().format(gain.abs())}',
+              !hasData ? '—' : '${gain >= 0 ? '+' : '-'}\$${NumberFormat.compact().format(gain.abs())}',
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: gainColor),
             ),
-            if (hasData && !_isLoadingHoldings) ...[
+            if (hasData) ...[
               const SizedBox(height: 1),
-              Text(
-                '${pct >= 0 ? '+' : ''}${pct.toStringAsFixed(1)}%',
-                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: gainColor.withValues(alpha: 0.7)),
-              ),
+              Text('${pct >= 0 ? '+' : ''}${pct.toStringAsFixed(1)}%',
+                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: gainColor.withValues(alpha: 0.7))),
             ],
             const SizedBox(height: 2),
-            Text('PORTFOLIO', style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w500, color: AppTheme.textTertiaryColor, letterSpacing: 0.5)),
+            const Text('PORTFOLIO', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w500, color: AppTheme.textTertiaryColor, letterSpacing: 0.5)),
           ]),
         )),
         const SizedBox(width: 8),
@@ -768,8 +994,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         const SizedBox(height: 16),
         SizedBox(width: double.infinity, child: OutlinedButton(
           onPressed: () {
-            if (hasRules) MainScreen.mainKey.currentState?.navigateToScan(segment: 0);
-            else MainScreen.mainKey.currentState?.navigateToScan(segment: 1);
+            if (hasRules) {
+              MainScreen.mainKey.currentState?.navigateToScan(segment: 0);
+            } else {
+              MainScreen.mainKey.currentState?.navigateToScan(segment: 1);
+            }
           },
           style: OutlinedButton.styleFrom(foregroundColor: AppTheme.accentColor, side: BorderSide(color: AppTheme.accentColor.withValues(alpha: 0.5)), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)), padding: const EdgeInsets.symmetric(vertical: 12)),
           child: Text(hasRules ? 'Go to Scanner' : 'Set Up Rules'),
@@ -956,7 +1185,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   // HOLDINGS CARD (with long-press)
   // ──────────────────────────────────────────────
 
-  Widget _buildHoldingCard(Holding holding) {
+  Widget _buildHoldingCard(Holding holding, AppProvider provider) {
     final isUp = holding.unrealizedGain >= 0;
     final color = isUp ? AppTheme.successColor : AppTheme.errorColor;
     final price = holding.currentPrice ?? holding.avgCostBasis;
@@ -1044,7 +1273,11 @@ class _SparklinePainter extends CustomPainter {
     for (int i = 0; i < data.length; i++) {
       final x = (i / (data.length - 1)) * size.width;
       final y = size.height - ((data[i] - min) / range) * size.height;
-      if (i == 0) path.moveTo(x, y); else path.lineTo(x, y);
+      if (i == 0) {
+        path.moveTo(x, y);
+      } else {
+        path.lineTo(x, y);
+      }
     }
     canvas.drawPath(path, paint);
     final lastY = size.height - ((data.last - min) / range) * size.height;

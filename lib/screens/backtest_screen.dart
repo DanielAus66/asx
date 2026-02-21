@@ -13,7 +13,11 @@ import 'stock_detail_sheet.dart';
 import 'paywall_screen.dart';
 
 class BacktestScreen extends StatefulWidget {
-  const BacktestScreen({super.key});
+  /// If provided, auto-starts backtest with these rules (skips rule picker)
+  final List<ScanRule>? autoRules;
+  /// If provided with autoRules, uses this period instead of default
+  final int? autoPeriod;
+  const BacktestScreen({super.key, this.autoRules, this.autoPeriod});
   @override
   State<BacktestScreen> createState() => _BacktestScreenState();
 }
@@ -32,6 +36,27 @@ class _BacktestScreenState extends State<BacktestScreen> {
   int _testedPeriod = 0;
   
   bool _isLoading = false;
+  bool _autoStarted = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.autoRules != null && widget.autoRules!.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!_autoStarted) {
+          _autoStarted = true;
+          _runAutoBacktest();
+        }
+      });
+    }
+  }
+
+  Future<void> _runAutoBacktest() async {
+    final rules = widget.autoRules!;
+    final period = widget.autoPeriod ?? 14;
+    final provider = Provider.of<AppProvider>(context, listen: false);
+    _runBacktest(provider, rules, period);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -54,47 +79,112 @@ class _BacktestScreenState extends State<BacktestScreen> {
           icon: const Icon(Icons.close),
           onPressed: () {
             provider.stopScan();
-            setState(() => _isLoading = false);
+            if (_signals.isNotEmpty) {
+              setState(() { _isLoading = false; _hasResults = true; _totalSignals = _signals.length; });
+            } else {
+              setState(() => _isLoading = false);
+            }
           },
         ),
+        actions: [
+          if (_signals.isNotEmpty)
+            TextButton(
+              onPressed: () {
+                provider.stopScan();
+                setState(() { _isLoading = false; _hasResults = true; _totalSignals = _signals.length; });
+              },
+              child: const Text('View Results', style: TextStyle(color: AppTheme.accentColor, fontWeight: FontWeight.w600)),
+            ),
+        ],
       ),
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(32),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const SizedBox(width: 80, height: 80, child: CircularProgressIndicator(strokeWidth: 6, color: AppTheme.accentColor)),
-              const SizedBox(height: 32),
-              Text(_testedRuleName, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              Text(provider.scanStatus, style: const TextStyle(color: AppTheme.textSecondaryColor)),
-              const SizedBox(height: 24),
-              if (_signals.isNotEmpty)
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                  decoration: BoxDecoration(color: AppTheme.cardColor, borderRadius: BorderRadius.circular(12)),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(Icons.bolt, color: AppTheme.accentColor, size: 20),
-                      const SizedBox(width: 8),
-                      Text('${_signals.length} signals found', style: const TextStyle(fontWeight: FontWeight.w600)),
-                    ],
-                  ),
+      body: CustomScrollView(
+        slivers: [
+          // Progress card
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 8),
+              child: Container(
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: AppTheme.cardColor, borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: const Color(0xFF7C3AED).withValues(alpha: 0.3)),
                 ),
-              const SizedBox(height: 32),
-              TextButton.icon(
-                onPressed: () {
-                  provider.stopScan();
-                  setState(() => _isLoading = false);
-                },
-                icon: const Icon(Icons.stop, color: AppTheme.errorColor),
-                label: const Text('Stop', style: TextStyle(color: AppTheme.errorColor)),
+                child: Column(children: [
+                  Row(children: [
+                    const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.5, color: Color(0xFF7C3AED))),
+                    const SizedBox(width: 14),
+                    Expanded(child: Text(_testedRuleName, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15))),
+                  ]),
+                  const SizedBox(height: 12),
+                  Text(provider.scanStatus, style: const TextStyle(fontSize: 13, color: AppTheme.textSecondaryColor)),
+                  const SizedBox(height: 12),
+                  Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                    Text(_getPeriodLabel(_testedPeriod), style: const TextStyle(fontSize: 12, color: AppTheme.textTertiaryColor)),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(color: const Color(0xFF7C3AED).withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6)),
+                      child: Text('${_signals.length} signals', style: const TextStyle(fontSize: 12, color: Color(0xFF7C3AED), fontWeight: FontWeight.w600)),
+                    ),
+                  ]),
+                  const SizedBox(height: 16),
+                  TextButton.icon(
+                    onPressed: () {
+                      provider.stopScan();
+                      if (_signals.isNotEmpty) {
+                        setState(() { _isLoading = false; _hasResults = true; _totalSignals = _signals.length; });
+                      } else {
+                        setState(() => _isLoading = false);
+                      }
+                    },
+                    icon: const Icon(Icons.stop, color: AppTheme.errorColor, size: 18),
+                    label: const Text('Stop', style: TextStyle(color: AppTheme.errorColor)),
+                  ),
+                ]),
               ),
-            ],
+            ),
           ),
-        ),
+
+          // Live signal cards
+          if (_signals.isNotEmpty) ...[
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+                child: Row(children: [
+                  const Text('Signals Found', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                  const SizedBox(width: 10),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(color: const Color(0xFF7C3AED).withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6)),
+                    child: Text('${_signals.length}', style: const TextStyle(fontSize: 12, color: Color(0xFF7C3AED), fontWeight: FontWeight.w600)),
+                  ),
+                ]),
+              ),
+            ),
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: AppTheme.warningColor.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: AppTheme.warningColor.withValues(alpha: 0.2))),
+                  child: const Row(children: [
+                    Icon(Icons.info_outline, size: 13, color: AppTheme.warningColor), SizedBox(width: 6),
+                    Expanded(child: Text('General information only — not financial advice. Consider your own circumstances.', style: TextStyle(fontSize: 10, color: AppTheme.warningColor, height: 1.3))),
+                  ]),
+                ),
+              ),
+            ),
+            SliverList(
+              delegate: SliverChildBuilderDelegate(
+                (ctx, i) => _buildSignalCard(_signals[i], provider),
+                childCount: _signals.length,
+              ),
+            ),
+          ],
+
+          const SliverToBoxAdapter(child: SizedBox(height: 100)),
+        ],
       ),
     );
   }

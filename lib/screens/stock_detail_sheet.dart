@@ -169,11 +169,11 @@ class _StockDetailSheetState extends State<StockDetailSheet> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Row(
+                            const Row(
                               children: [
                                 Icon(Icons.bolt, size: 16, color: AppTheme.accentColor),
-                                const SizedBox(width: 6),
-                                const Text('Why this was surfaced', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppTheme.accentColor)),
+                                SizedBox(width: 6),
+                                Text('Why this was surfaced', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppTheme.accentColor)),
                               ],
                             ),
                             const SizedBox(height: 10),

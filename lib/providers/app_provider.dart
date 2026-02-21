@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/stock.dart';
+import '../models/holding.dart';
 import '../models/watchlist_item.dart';
 import '../models/scan_rule.dart';
 import '../models/scan_filters.dart';
@@ -83,6 +84,9 @@ class AppProvider with ChangeNotifier, WatchlistProviderMixin {
   DateTime? _lastRefresh;
   SubscriptionService? _subscription;
   PortfolioSource _portfolioSource = PortfolioSource.holdings;
+  List<Holding> _holdings = [];
+  bool _disclaimerAccepted = false;
+  ScanSortOption _scanSortOption = ScanSortOption.matchTime;
 
   // Provide stockCache and subscription to WatchlistProviderMixin
   @override
@@ -96,6 +100,20 @@ class AppProvider with ChangeNotifier, WatchlistProviderMixin {
   List<ScanRule> get activeRules => _rules.where((r) => r.isActive).toList();
   List<Map<String, dynamic>> get alerts => _alerts;
   List<ScanResult> get scanResults => _scanResults;
+
+  /// Scan results with current filters applied dynamically.
+  /// Updating filters re-renders the results list without re-running the scan.
+  List<ScanResult> get filteredScanResults {
+    if (!_scanFilters.enabled) return _scanResults;
+    return _scanResults.where((r) {
+      final s = r.stock;
+      return _scanFilters.passesFilters(
+        currentPrice: s.currentPrice,
+        avgVolume: s.avgVolume ?? s.volume.toDouble(),
+        dayChangePercent: s.changePercent,
+      );
+    }).toList();
+  }
   
   /// Get cached backtest stats for a rule, or null if not yet tested
   Map<String, dynamic>? getRuleBacktestStats(String ruleId) => _ruleBacktestStats[ruleId];
@@ -120,6 +138,111 @@ class AppProvider with ChangeNotifier, WatchlistProviderMixin {
     _portfolioSource = source;
     await StorageService.saveSettings({'portfolioSource': source.name});
     notifyListeners();
+  }
+
+  // ── Holdings management ──
+  List<Holding> get holdings => _holdings;
+  bool get disclaimerAccepted => _disclaimerAccepted;
+  ScanSortOption get scanSortOption => _scanSortOption;
+
+  Future<void> loadHoldings() async {
+    _holdings = await StorageService.loadHoldings();
+    if (_holdings.isNotEmpty) {
+      try {
+        final symbols = _holdings.map((h) => h.symbol).toList();
+        final stocks = await ApiService.fetchStocks(symbols);
+        for (final stock in stocks) {
+          final idx = _holdings.indexWhere((h) => h.symbol == stock.symbol);
+          if (idx != -1) _holdings[idx] = _holdings[idx].copyWith(currentPrice: stock.currentPrice);
+        }
+        await StorageService.saveHoldings(_holdings);
+      } catch (_) {}
+    }
+    notifyListeners();
+  }
+
+  double get holdingsGain {
+    double gain = 0;
+    for (final h in _holdings) { gain += h.unrealizedGain; }
+    return gain;
+  }
+
+  double get holdingsCostBasis {
+    double cost = 0;
+    for (final h in _holdings) { cost += h.costBasis; }
+    return cost;
+  }
+
+  double get holdingsValue {
+    double val = 0;
+    for (final h in _holdings) { val += h.marketValue; }
+    return val;
+  }
+
+  Future<void> addHolding(Holding holding) async {
+    final idx = _holdings.indexWhere((h) => h.symbol == holding.symbol);
+    if (idx != -1) {
+      _holdings[idx] = holding;
+    } else {
+      _holdings.add(holding);
+    }
+    await StorageService.saveHoldings(_holdings);
+    notifyListeners();
+  }
+
+  Future<void> updateHolding(String symbol, {int? quantity, double? avgCostBasis}) async {
+    final idx = _holdings.indexWhere((h) => h.symbol == symbol);
+    if (idx != -1) {
+      _holdings[idx] = _holdings[idx].copyWith(
+        quantity: quantity,
+        avgCostBasis: avgCostBasis,
+      );
+      await StorageService.saveHoldings(_holdings);
+      notifyListeners();
+    }
+  }
+
+  Future<void> removeHolding(String symbol) async {
+    _holdings.removeWhere((h) => h.symbol == symbol);
+    await StorageService.saveHoldings(_holdings);
+    notifyListeners();
+  }
+
+  bool isInHoldings(String symbol) => _holdings.any((h) => h.symbol == symbol);
+
+  // ── Disclaimer ──
+  Future<void> acceptDisclaimer() async {
+    _disclaimerAccepted = true;
+    await StorageService.saveSettings({'disclaimerAccepted': true});
+    notifyListeners();
+  }
+
+  // ── Scan sort ──
+  void setScanSort(ScanSortOption option) {
+    _scanSortOption = option;
+    _applyScanSort();
+    notifyListeners();
+  }
+
+  void _applyScanSort() {
+    switch (_scanSortOption) {
+      case ScanSortOption.matchTime:
+        _scanResults.sort((a, b) => b.matchedAt.compareTo(a.matchedAt));
+      case ScanSortOption.alphabetical:
+        _scanResults.sort((a, b) => a.stock.symbol.compareTo(b.stock.symbol));
+      case ScanSortOption.priceHigh:
+        _scanResults.sort((a, b) => b.stock.currentPrice.compareTo(a.stock.currentPrice));
+      case ScanSortOption.priceLow:
+        _scanResults.sort((a, b) => a.stock.currentPrice.compareTo(b.stock.currentPrice));
+      case ScanSortOption.changeHigh:
+        _scanResults.sort((a, b) => b.stock.changePercent.compareTo(a.stock.changePercent));
+      case ScanSortOption.changeLow:
+        _scanResults.sort((a, b) => a.stock.changePercent.compareTo(b.stock.changePercent));
+      case ScanSortOption.volumeHigh:
+        _scanResults.sort((a, b) => b.stock.volume.compareTo(a.stock.volume));
+      case ScanSortOption.rulesMatched:
+        _scanResults.sort((a, b) => b.matchedRuleNames.length.compareTo(a.matchedRuleNames.length));
+    }
   }
 
   void setSubscription(SubscriptionService subscription) {
@@ -149,6 +272,8 @@ class AppProvider with ChangeNotifier, WatchlistProviderMixin {
       _lastRefresh = await StorageService.getCacheTime();
       
       // Load persisted scan results from last session
+      // Apply persisted active/inactive state as a fallback to rule JSON load
+      await _applyPersistedActiveState(_rules);
       await _loadScanResults();
       
       // Load settings
@@ -160,6 +285,10 @@ class AppProvider with ChangeNotifier, WatchlistProviderMixin {
           (e) => e.name == srcStr, orElse: () => PortfolioSource.holdings,
         );
       }
+      _disclaimerAccepted = settings['disclaimerAccepted'] == true;
+      
+      // Load holdings
+      await loadHoldings();
       
       await ApiService.initializeValidSymbols();
       
@@ -202,6 +331,28 @@ class AppProvider with ChangeNotifier, WatchlistProviderMixin {
     notifyListeners();
   }
 
+  // Lightweight fallback: persists active rule IDs separately so
+  // even if full rule JSON fails to load, toggle state survives.
+  static const String _activeRuleIdsKey = 'active_rule_ids_v1';
+
+  Future<void> _saveActiveRuleIds() async {
+    final prefs = await SharedPreferences.getInstance();
+    final activeIds = _rules.where((r) => r.isActive).map((r) => r.id).toList();
+    await prefs.setStringList(_activeRuleIdsKey, activeIds);
+  }
+
+  Future<void> _applyPersistedActiveState(List<ScanRule> rules) async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getStringList(_activeRuleIdsKey);
+    if (saved == null) return; // first run — keep defaults
+    final activeSet = saved.toSet();
+    for (int i = 0; i < rules.length; i++) {
+      // Community rules always default to active when first subscribed
+      if (rules[i].isCommunityRule) continue;
+      rules[i] = rules[i].copyWith(isActive: activeSet.contains(rules[i].id));
+    }
+  }
+
   Future<void> toggleRule(String id) async {
     if (!canUseRule(id)) {
       _error = 'Upgrade to Pro to use this rule';
@@ -212,6 +363,7 @@ class AppProvider with ChangeNotifier, WatchlistProviderMixin {
     if (index != -1) {
       _rules[index] = _rules[index].copyWith(isActive: !_rules[index].isActive);
       await StorageService.saveRules(_rules);
+      await _saveActiveRuleIds();
       notifyListeners();
     }
   }
@@ -321,14 +473,18 @@ class AppProvider with ChangeNotifier, WatchlistProviderMixin {
               c.type == RuleConditionType.eventVolumeBreakout ||
               c.type == RuleConditionType.volumeSpike ||
               c.type == RuleConditionType.stealthAccumulation
-            )) anyNeedsVolume = true;
+            )) {
+              anyNeedsVolume = true;
+            }
             if (rule.conditions.any((c) =>
               c.type == RuleConditionType.event52WeekHighCrossover ||
               c.type == RuleConditionType.eventMomentumCrossover ||
               c.type == RuleConditionType.stateMomentumPositive ||
               c.type == RuleConditionType.stateNear52WeekHigh ||
               c.type == RuleConditionType.momentum6Month
-            )) anyNeedsLongHistory = true;
+            )) {
+              anyNeedsLongHistory = true;
+            }
           }
           
           // Fetch data once with the maximum required lookback
@@ -502,38 +658,6 @@ class AppProvider with ChangeNotifier, WatchlistProviderMixin {
         _scanResults = results;
       }
     } catch (_) {}
-  }
-
-  // ─── Sort scan results ─────────────────────────────────────
-
-  ScanSortOption _scanSortOption = ScanSortOption.matchTime;
-  ScanSortOption get scanSortOption => _scanSortOption;
-
-  void setScanSort(ScanSortOption option) {
-    _scanSortOption = option;
-    _applyScanSort();
-    notifyListeners();
-  }
-
-  void _applyScanSort() {
-    switch (_scanSortOption) {
-      case ScanSortOption.matchTime:
-        _scanResults.sort((a, b) => b.matchedAt.compareTo(a.matchedAt));
-      case ScanSortOption.alphabetical:
-        _scanResults.sort((a, b) => a.stock.symbol.compareTo(b.stock.symbol));
-      case ScanSortOption.priceHigh:
-        _scanResults.sort((a, b) => b.stock.currentPrice.compareTo(a.stock.currentPrice));
-      case ScanSortOption.priceLow:
-        _scanResults.sort((a, b) => a.stock.currentPrice.compareTo(b.stock.currentPrice));
-      case ScanSortOption.changeHigh:
-        _scanResults.sort((a, b) => b.stock.changePercent.compareTo(a.stock.changePercent));
-      case ScanSortOption.changeLow:
-        _scanResults.sort((a, b) => a.stock.changePercent.compareTo(b.stock.changePercent));
-      case ScanSortOption.volumeHigh:
-        _scanResults.sort((a, b) => b.stock.volume.compareTo(a.stock.volume));
-      case ScanSortOption.rulesMatched:
-        _scanResults.sort((a, b) => b.matchedRuleNames.length.compareTo(a.matchedRuleNames.length));
-    }
   }
 
   Future<void> markAlertRead(String id) async {

@@ -50,7 +50,7 @@ class ApiService {
     if (_requestCount >= _maxRequestsPerWindow) {
       print('DEBUG API: Rate limit reached ($_requestCount/$_maxRequestsPerWindow), waiting...');
       final waitTime = _windowDuration - now.difference(_windowStart);
-      await Future.delayed(waitTime.isNegative ? const Duration(seconds: 5) : Duration(seconds: 5));
+      await Future.delayed(waitTime.isNegative ? const Duration(seconds: 5) : const Duration(seconds: 5));
       _requestCount = 0;
       _windowStart = DateTime.now();
     }
